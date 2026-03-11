@@ -1,0 +1,13 @@
+{
+  "repo_url": "https://github.com/mruniverse8/kaggle-experiments-.git",
+  "repo_dir": "/kaggle/working/kaggle-experiments-",
+  "branch": "twitter_sentiment",
+  "train_csv": "/kaggle/input/competitions/tweet-sentiment-extraction/train.csv",
+  "output_dir": "/kaggle/working/twitter_sentiment_outputs/qwen35_08b_kfold",
+  "model_name": "Qwen/Qwen3.5-0.8B",
+  "prompt_text": "You are a professional emotion identifier.",
+  "n_splits": 5,
+  "seed": 42,
+  "trust_remote_code": false,
+  "max_new_tokens": 24
+}

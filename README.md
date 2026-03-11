@@ -45,6 +45,12 @@ The dataset preprocessing mirrors the original Kaggle span handling:
 - `environment.yml`: conda environment definition
 - `requirements.txt`: pip package list
 - `setup_conda_env.sh`: automated conda + pip setup
+- `config/kaggle_train_kfold.json`: Kaggle K-fold training config
+- `config/kaggle_eval_kfold.json`: Kaggle K-fold evaluation config
+- `config/kaggle_example_inference.json`: Kaggle fast inference config
+- `notebooks/training_kfold.ipynb`: Kaggle training notebook
+- `notebooks/evaluation_kfold.ipynb`: Kaggle evaluation notebook
+- `notebooks/example_inference.ipynb`: Kaggle quick inference notebook
 
 ## Environment Setup
 
@@ -96,6 +102,22 @@ python train_qwen_span.py --config config/train_qwen35_08b.json
 Edit config values in:
 
 - `config/train_qwen35_08b.json`
+
+## Kaggle Notebooks
+
+These notebooks assume Kaggle competition paths:
+
+- `/kaggle/input/competitions/tweet-sentiment-extraction/train.csv`
+- `/kaggle/input/competitions/tweet-sentiment-extraction/test.csv`
+- `/kaggle/input/competitions/tweet-sentiment-extraction/sample_submission.csv`
+
+Run order:
+
+1. `notebooks/training_kfold.ipynb`
+2. `notebooks/evaluation_kfold.ipynb`
+3. `notebooks/example_inference.ipynb`
+
+Each notebook clones the repo branch and loads the matching config file from `config/`.
 
 ## Notes
 

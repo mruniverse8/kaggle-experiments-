@@ -53,8 +53,11 @@ def register_special_tokens(tokenizer, model=None) -> int:
         if tokenizer.eos_token is None:
             raise ValueError("Tokenizer must define eos_token or pad_token.")
         tokenizer.pad_token = tokenizer.eos_token
-    if model is not None and added > 0:
-        model.resize_token_embeddings(len(tokenizer))
+    if model is not None:
+        current_size = model.get_input_embeddings().weight.size(0)
+        target_size = len(tokenizer)
+        if current_size != target_size:
+            model.resize_token_embeddings(target_size)
     return added
 
 
