@@ -42,6 +42,13 @@ class CausalExtractionModel(nn.Module):
         )
         hidden = outputs.hidden_states[-1]
 
+        # Some base checkpoints run internal matmuls in bf16 while these heads
+        # are initialized in fp32. Align activations to head dtype to avoid
+        # matmul dtype mismatch errors in mixed/no-amp runs.
+        head_dtype = self.start_head.weight.dtype
+        if hidden.dtype != head_dtype:
+            hidden = hidden.to(head_dtype)
+
         start_logits = self.start_head(hidden).squeeze(-1)
         end_logits = self.end_head(hidden).squeeze(-1)
         select_logits = self.select_head(hidden).squeeze(-1)
@@ -52,4 +59,3 @@ class CausalExtractionModel(nn.Module):
             "end_logits": end_logits,
             "select_logits": select_logits,
         }
-
