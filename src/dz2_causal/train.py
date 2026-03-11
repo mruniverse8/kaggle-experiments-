@@ -46,6 +46,7 @@ def default_train_config() -> Dict:
         "trust_remote_code": False,
         "no_amp": False,
         "amp_dtype": "auto",
+        "run_smoke_test": True,
     }
 
 
@@ -123,6 +124,50 @@ def resolve_amp_settings(args: argparse.Namespace, device: torch.device):
     return True, amp_dtype, use_grad_scaler
 
 
+def run_amp_smoke_test(
+    model: torch.nn.Module,
+    loader: DataLoader,
+    optimizer: torch.optim.Optimizer,
+    device: torch.device,
+    use_amp: bool,
+    amp_dtype,
+    use_grad_scaler: bool,
+    scaler: torch.amp.GradScaler,
+) -> float:
+    """Run one optimizer step on a single batch to validate AMP settings."""
+    try:
+        batch = next(iter(loader))
+    except StopIteration as exc:
+        raise RuntimeError("Smoke test failed: training loader is empty.") from exc
+
+    batch = move_batch_to_device(batch, device)
+    model.train()
+    with torch.amp.autocast(device_type="cuda", dtype=amp_dtype, enabled=use_amp):
+        outputs = model(
+            input_ids=batch["input_ids"],
+            attention_mask=batch["attention_mask"],
+            labels=batch["labels"],
+        )
+        losses = compute_total_loss(
+            outputs=outputs,
+            batch=batch,
+            lambda_kl=0.0,
+            lambda_select=0.0,
+        )
+        loss = losses["loss"]
+
+    if use_grad_scaler:
+        scaler.scale(loss).backward()
+        scaler.step(optimizer)
+        scaler.update()
+    else:
+        loss.backward()
+        optimizer.step()
+
+    optimizer.zero_grad(set_to_none=True)
+    return float(losses["loss"].item())
+
+
 def train(args: argparse.Namespace) -> None:
     os.makedirs(args.output_dir, exist_ok=True)
     set_seed(args.seed)
@@ -175,6 +220,28 @@ def train(args: argparse.Namespace) -> None:
     use_amp, amp_dtype, use_grad_scaler = resolve_amp_settings(args, device)
     scaler = torch.amp.GradScaler("cuda", enabled=use_grad_scaler)
     optimizer.zero_grad(set_to_none=True)
+
+    if bool(getattr(args, "run_smoke_test", True)):
+        try:
+            smoke_loss = run_amp_smoke_test(
+                model=model,
+                loader=loader,
+                optimizer=optimizer,
+                device=device,
+                use_amp=use_amp,
+                amp_dtype=amp_dtype,
+                use_grad_scaler=use_grad_scaler,
+                scaler=scaler,
+            )
+            print(
+                f"AMP smoke test passed: loss={smoke_loss:.4f}, "
+                f"use_amp={use_amp}, amp_dtype={amp_dtype}, scaler={use_grad_scaler}"
+            )
+        except NotImplementedError as exc:
+            raise RuntimeError(
+                "AMP smoke test failed with unsupported dtype kernel. "
+                "Try setting amp_dtype='fp16' or no_amp=true in config."
+            ) from exc
 
     model.train()
     global_step = 0
@@ -282,4 +349,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--trust-remote-code", action="store_true", default=False)
     parser.add_argument("--no-amp", action="store_true", default=False)
     parser.add_argument("--amp-dtype", type=str, default="auto", choices=["auto", "fp16", "bf16"])
+    parser.add_argument("--run-smoke-test", dest="run_smoke_test", action="store_true")
+    parser.add_argument("--no-run-smoke-test", dest="run_smoke_test", action="store_false")
+    parser.set_defaults(run_smoke_test=True)
     return parser

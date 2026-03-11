@@ -118,6 +118,7 @@ Run order:
 3. `notebooks/example_inference.ipynb`
 
 Each notebook clones the repo branch and loads the matching config file from `config/`.
+`training_kfold.ipynb` runs a one-batch AMP smoke test before full K-fold training.
 
 ## Notes
 

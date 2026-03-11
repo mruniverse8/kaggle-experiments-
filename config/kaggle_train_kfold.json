@@ -26,5 +26,6 @@
   "seed": 42,
   "trust_remote_code": false,
   "no_amp": false,
-  "amp_dtype": "auto"
+  "amp_dtype": "auto",
+  "run_smoke_test": true
 }
