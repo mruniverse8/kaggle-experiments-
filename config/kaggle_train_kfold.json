@@ -25,5 +25,6 @@
   "log_every": 50,
   "seed": 42,
   "trust_remote_code": false,
-  "no_amp": false
+  "no_amp": false,
+  "amp_dtype": "auto"
 }

@@ -45,6 +45,7 @@ def default_train_config() -> Dict:
         "seed": 42,
         "trust_remote_code": False,
         "no_amp": False,
+        "amp_dtype": "auto",
     }
 
 
@@ -98,6 +99,30 @@ def move_batch_to_device(batch: Dict, device: torch.device) -> Dict:
     return out
 
 
+def resolve_amp_settings(args: argparse.Namespace, device: torch.device):
+    use_amp = device.type == "cuda" and not bool(getattr(args, "no_amp", False))
+    amp_pref = str(getattr(args, "amp_dtype", "auto")).lower()
+    if amp_pref not in {"auto", "fp16", "bf16"}:
+        raise ValueError("amp_dtype must be one of: auto, fp16, bf16")
+
+    if not use_amp:
+        return False, None, False
+
+    bf16_supported = torch.cuda.is_bf16_supported()
+    if amp_pref == "fp16":
+        amp_dtype = torch.float16
+    elif amp_pref == "bf16":
+        if not bf16_supported:
+            raise ValueError("amp_dtype=bf16 requested but GPU does not support bf16.")
+        amp_dtype = torch.bfloat16
+    else:
+        amp_dtype = torch.bfloat16 if bf16_supported else torch.float16
+
+    # GradScaler should be used with fp16 only; not with bf16.
+    use_grad_scaler = amp_dtype == torch.float16
+    return True, amp_dtype, use_grad_scaler
+
+
 def train(args: argparse.Namespace) -> None:
     os.makedirs(args.output_dir, exist_ok=True)
     set_seed(args.seed)
@@ -147,7 +172,9 @@ def train(args: argparse.Namespace) -> None:
         num_training_steps=total_steps,
     )
 
-    scaler = torch.cuda.amp.GradScaler(enabled=(torch.cuda.is_available() and not args.no_amp))
+    use_amp, amp_dtype, use_grad_scaler = resolve_amp_settings(args, device)
+    scaler = torch.amp.GradScaler("cuda", enabled=use_grad_scaler)
+    optimizer.zero_grad(set_to_none=True)
 
     model.train()
     global_step = 0
@@ -161,7 +188,7 @@ def train(args: argparse.Namespace) -> None:
         for step, batch in enumerate(loader):
             batch = move_batch_to_device(batch, device)
 
-            with torch.cuda.amp.autocast(enabled=(torch.cuda.is_available() and not args.no_amp)):
+            with torch.amp.autocast(device_type="cuda", dtype=amp_dtype, enabled=use_amp):
                 outputs = model(
                     input_ids=batch["input_ids"],
                     attention_mask=batch["attention_mask"],
@@ -175,11 +202,17 @@ def train(args: argparse.Namespace) -> None:
                 )
                 loss = losses["loss"] / args.grad_accum_steps
 
-            scaler.scale(loss).backward()
+            if use_grad_scaler:
+                scaler.scale(loss).backward()
+            else:
+                loss.backward()
 
             if (step + 1) % args.grad_accum_steps == 0:
-                scaler.step(optimizer)
-                scaler.update()
+                if use_grad_scaler:
+                    scaler.step(optimizer)
+                    scaler.update()
+                else:
+                    optimizer.step()
                 optimizer.zero_grad(set_to_none=True)
                 scheduler.step()
                 global_step += 1
@@ -248,4 +281,5 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--trust-remote-code", action="store_true", default=False)
     parser.add_argument("--no-amp", action="store_true", default=False)
+    parser.add_argument("--amp-dtype", type=str, default="auto", choices=["auto", "fp16", "bf16"])
     return parser
