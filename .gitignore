@@ -1,0 +1,5 @@
+# Keep raw dataset locally but do not version huge files
+
+dogs_vs_cats/data/dogs-vs-cats/
+__pycache__/
+*.pyc

@@ -1,0 +1,19 @@
+{
+  "repo_dir": "/path/to/kaggle-experiments-",
+  "branch": "dogs_vs_cats",
+  "competition_dir": "/path/to/competitions/dogs-vs-cats-redux-kernels-edition",
+  "train_zip": "/path/to/competitions/dogs-vs-cats-redux-kernels-edition/train.zip",
+  "test_zip": "/path/to/competitions/dogs-vs-cats-redux-kernels-edition/test.zip",
+  "sample_submission_csv": "/path/to/competitions/dogs-vs-cats-redux-kernels-edition/sample_submission.csv",
+  "work_dir": "/path/to/work/dogs_vs_cats",
+  "extracted_dir": "/path/to/work/dogs_vs_cats/extracted",
+  "train_extracted_dir": "/path/to/work/dogs_vs_cats/extracted/train_data",
+  "test_extracted_dir": "/path/to/work/dogs_vs_cats/extracted/test_data",
+  "manifests_dir": "/path/to/work/dogs_vs_cats/manifests",
+  "checkpoints_dir": "/path/to/work/dogs_vs_cats/checkpoints",
+  "evaluation_dir": "/path/to/work/dogs_vs_cats/evaluation",
+  "metrics_dir": "/path/to/work/dogs_vs_cats/evaluation/metrics",
+  "plots_dir": "/path/to/work/dogs_vs_cats/evaluation/plots",
+  "predictions_dir": "/path/to/work/dogs_vs_cats/evaluation/predictions",
+  "reports_dir": "/path/to/work/dogs_vs_cats/evaluation/reports"
+}

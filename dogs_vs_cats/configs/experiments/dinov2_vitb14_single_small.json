@@ -1,0 +1,85 @@
+{
+  "experiment_name": "dinov2_vitb14_single_small",
+  "seed": 42,
+  "task": {
+    "target_name": "is_dog",
+    "num_classes": 1,
+    "positive_class": "dog"
+  },
+  "data": {
+    "train_ratio": 0.8,
+    "val_ratio": 0.2,
+    "stratified": true,
+    "image_size": 224,
+    "batch_size_train": 12,
+    "batch_size_eval": 32,
+    "num_workers": 2,
+    "pin_memory": true
+  },
+  "model": {
+    "backbone_name": "facebook/dinov2-base",
+    "backbone_alias": "vitb14",
+    "embed_dim": 768,
+    "head_type": "layernorm_linear",
+    "head_dropout": 0.0
+  },
+  "freeze": {
+    "freeze_backbone": false,
+    "trainable_last_n_blocks": 4
+  },
+  "augmentation": {
+    "train": {
+      "random_resized_crop_scale": [0.6, 1.0],
+      "horizontal_flip_p": 0.5,
+      "color_jitter": [0.15, 0.15, 0.15, 0.05],
+      "random_erasing_p": 0.1
+    },
+    "eval": {
+      "resize": 256,
+      "center_crop": 224
+    },
+    "normalize": {
+      "mean": [0.485, 0.456, 0.406],
+      "std": [0.229, 0.224, 0.225]
+    }
+  },
+  "optimization": {
+    "optimizer": "adamw",
+    "lr_backbone": 1.5e-05,
+    "lr_head": 0.0005,
+    "weight_decay": 0.05,
+    "betas": [0.9, 0.999],
+    "eps": 1e-08,
+    "grad_clip_norm": 1.0
+  },
+  "scheduler": {
+    "name": "cosine",
+    "warmup_ratio": 0.1,
+    "min_lr": 1e-06
+  },
+  "training": {
+    "epochs": 2,
+    "mixed_precision": true,
+    "grad_accum_steps": 2,
+    "early_stopping_patience": 2,
+    "log_every_steps": 20,
+    "eval_every_steps": 80
+  },
+  "evaluation": {
+    "monitor": "val_auc",
+    "metrics": ["val_loss", "val_auc", "val_logloss", "val_accuracy"],
+    "decision_threshold": 0.5
+  },
+  "use_data_parallel": false,
+  "parallel_gpu_ids": [0, 1],
+  "amp_dtype": "fp16",
+  "gradient_checkpointing": true,
+  "weights_source": "auto_download_with_fallback",
+  "local_weights_path": "",
+  "sanity": {
+    "train_samples": 64,
+    "val_samples": 64,
+    "smoke_steps": 4,
+    "batch_size": 8
+  }
+}

@@ -1,0 +1,1 @@
+experiment_name,config_file,backbone,head_type,image_size,batch_size_train,epochs,status,best_val_auc,best_val_loss,notes,created_at

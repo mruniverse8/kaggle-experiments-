@@ -1,0 +1,13 @@
+{
+  "sweep_name": "vitb14_lr_wd_grid",
+  "base_experiment": "dinov2_vitb14_partial_unfreeze",
+  "search_space": {
+    "optimization.lr_backbone": [1e-05, 2e-05, 3e-05],
+    "optimization.lr_head": [0.0003, 0.0005, 0.0008],
+    "optimization.weight_decay": [0.02, 0.05, 0.1],
+    "data.image_size": [224, 280]
+  },
+  "selection_metric": "val_auc",
+  "max_trials": 20,
+  "notes": "Notebook can iterate this grid manually or via a lightweight loop."
+}
