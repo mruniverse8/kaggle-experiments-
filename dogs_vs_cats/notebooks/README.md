@@ -23,6 +23,13 @@ Notebook-first run order for DinoV2 Dogs vs Cats (producer/consumer):
 - default behavior: no training
 - optional fallback evaluate-only mode from uploaded checkpoints (`ENABLE_FALLBACK_EVAL=1`)
 
+4. `04_dinov2_linear_probing_comparison_parallel_t4x2.ipynb`
+- producer notebook: trains two runs in sequence on Kaggle GPU
+- run 1: `dinov2_vitb14_linear_probe` (backbone frozen, train classifier head only)
+- run 2: `dinov2_vitb14_parallel_t4x2_small` (baseline from notebook 02)
+- compares both runs with a unified "special" figure and summary table
+- exports artifacts for both runs into the bundle format
+
 ## Config Switching (02 Producer)
 Use environment variable `CFG_PATH` to swap profiles:
 - `dogs_vs_cats/configs/experiments/dinov2_vitb14_single_small.json`
