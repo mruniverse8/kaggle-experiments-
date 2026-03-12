@@ -41,6 +41,12 @@ class CausalExtractionModel(nn.Module):
             use_cache=False,
             return_dict=True,
         )
+        ce_loss = outputs.loss
+        # DataParallel warns when gathering scalar tensors across devices.
+        # Keep CE loss as a length-1 tensor so gather happens without warning.
+        if torch.is_tensor(ce_loss) and ce_loss.ndim == 0:
+            ce_loss = ce_loss.unsqueeze(0)
+
         start_logits = None
         end_logits = None
         select_logits = None
@@ -60,7 +66,7 @@ class CausalExtractionModel(nn.Module):
             select_logits = self.select_head(hidden).squeeze(-1)
 
         return {
-            "ce_loss": outputs.loss,
+            "ce_loss": ce_loss,
             "start_logits": start_logits,
             "end_logits": end_logits,
             "select_logits": select_logits,
