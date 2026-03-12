@@ -25,6 +25,7 @@ python dogs_vs_cats/src/preprocess_competition_data.py \
 ```
 
 - verify train/val/test manifest files exist
+- if manifests already exist, skip preprocess and continue to sanity/training
 - preprocess mode now prefers direct dataset folders (`train_dir` / `test_dir`) when available
 - if direct folders are missing, it falls back to extracting `train.zip` / `test.zip`
 

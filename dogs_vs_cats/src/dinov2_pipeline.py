@@ -256,6 +256,47 @@ def _collect_test_records_from_dir(test_root: Path) -> List[Dict[str, Any]]:
     return records
 
 
+def _discover_direct_train_test_dirs(paths_cfg: JSONDict, competition_dir: Path) -> Tuple[Optional[Path], Optional[Path]]:
+    configured_train = Path(paths_cfg.get("train_dir", "")) if paths_cfg.get("train_dir") else None
+    configured_test = Path(paths_cfg.get("test_dir", "")) if paths_cfg.get("test_dir") else None
+    if configured_train is not None and configured_test is not None and configured_train.exists() and configured_test.exists():
+        return configured_train, configured_test
+
+    roots: List[Path] = _candidate_competition_dirs(competition_dir)
+    roots.extend(
+        [
+            Path("/kaggle/input/dogs-vs-cats-redux-kernels-edition"),
+            Path("/kaggle/input/dogs-cats-images/dog vs cat/dataset"),
+            competition_dir / "dog vs cat" / "dataset",
+        ]
+    )
+
+    # Keep order while deduplicating.
+    unique_roots: List[Path] = []
+    seen = set()
+    for root in roots:
+        key = root.as_posix()
+        if key in seen:
+            continue
+        seen.add(key)
+        unique_roots.append(root)
+
+    candidate_pairs: List[Tuple[str, str]] = [
+        ("training_set", "test_set"),
+        ("train", "test1"),
+        ("train", "test"),
+    ]
+
+    for root in unique_roots:
+        for train_name, test_name in candidate_pairs:
+            train_dir = root / train_name
+            test_dir = root / test_name
+            if train_dir.exists() and test_dir.exists():
+                return train_dir, test_dir
+
+    return None, None
+
+
 def _locate_image_root(extract_dir: Path, preferred: str) -> Path:
     candidate = extract_dir / preferred
     if candidate.exists():
@@ -287,8 +328,10 @@ def _parse_train_label(filename: str) -> Optional[int]:
 
 def build_manifests(paths_cfg: JSONDict, exp_cfg: JSONDict, force_extract: bool = False) -> Dict[str, Any]:
     paths = resolve_paths(paths_cfg)
-    direct_train_dir = Path(paths_cfg.get("train_dir", "")) if paths_cfg.get("train_dir") else None
-    direct_test_dir = Path(paths_cfg.get("test_dir", "")) if paths_cfg.get("test_dir") else None
+    direct_train_dir, direct_test_dir = _discover_direct_train_test_dirs(
+        paths_cfg=paths_cfg,
+        competition_dir=paths["competition_dir"],
+    )
 
     source_mode = "zip_competition"
     if direct_train_dir is not None and direct_test_dir is not None and direct_train_dir.exists() and direct_test_dir.exists():
