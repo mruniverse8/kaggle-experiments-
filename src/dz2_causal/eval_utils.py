@@ -16,6 +16,47 @@ def word_jaccard(str1: str, str2: str) -> float:
     return float(len(c)) / float(denom + 1e-8)
 
 
+def _normalize_ws(text: str) -> str:
+    return " ".join(str(text).split())
+
+
+def best_tweet_span_by_jaccard(tweet: str, generated_text: str) -> str:
+    """
+    Project generated output onto a contiguous span from tweet words.
+    This aligns inference with the competition metric, which is word-level Jaccard.
+    """
+    tweet_norm = _normalize_ws(tweet)
+    pred_norm = _normalize_ws(generated_text)
+
+    if not tweet_norm:
+        return pred_norm
+
+    tweet_words = tweet_norm.split()
+    pred_words = pred_norm.split()
+
+    if not pred_words:
+        return tweet_norm
+
+    pred_len = len(pred_words)
+    best_text = tweet_words[0]
+    best_rank = (-1.0, float("-inf"), float("-inf"), float("-inf"))
+
+    for i in range(len(tweet_words)):
+        for j in range(i, len(tweet_words)):
+            candidate_words = tweet_words[i : j + 1]
+            candidate_text = " ".join(candidate_words)
+            score = word_jaccard(pred_norm, candidate_text)
+            len_gap = abs(len(candidate_words) - pred_len)
+            # Rank priority: higher Jaccard, closer length to prediction,
+            # shorter span, earlier position.
+            rank = (score, -float(len_gap), -float(len(candidate_words)), -float(i))
+            if rank > best_rank:
+                best_rank = rank
+                best_text = candidate_text
+
+    return best_text
+
+
 def build_prompt_text(prompt: str, tweet: str, sentiment: str) -> str:
     tweet_norm = normalize_kaggle_span_text(tweet)
     return (
@@ -47,6 +88,7 @@ def predict_selected_text(
     sentiment: str,
     device: torch.device,
     max_new_tokens: int = 24,
+    constrain_to_tweet_span: bool = True,
 ) -> str:
     prompt_text = build_prompt_text(prompt, tweet, sentiment)
     encoded = tokenizer(prompt_text, return_tensors="pt", add_special_tokens=False)
@@ -61,7 +103,10 @@ def predict_selected_text(
         pad_token_id=tokenizer.pad_token_id,
         eos_token_id=tokenizer.eos_token_id,
     )
-    return decode_generated_answer(tokenizer, out[0], prompt_len)
+    pred = decode_generated_answer(tokenizer, out[0], prompt_len)
+    if constrain_to_tweet_span:
+        return best_tweet_span_by_jaccard(tweet=tweet, generated_text=pred)
+    return pred
 
 
 @torch.no_grad()
@@ -72,6 +117,7 @@ def evaluate_dataframe_jaccard(
     prompt_text: str,
     device: torch.device,
     max_new_tokens: int = 24,
+    constrain_to_tweet_span: bool = True,
 ) -> Dict[str, object]:
     preds: List[str] = []
     scores: List[float] = []
@@ -84,6 +130,7 @@ def evaluate_dataframe_jaccard(
             sentiment=str(row.sentiment),
             device=device,
             max_new_tokens=max_new_tokens,
+            constrain_to_tweet_span=constrain_to_tweet_span,
         )
         target = str(row.selected_text).strip()
         score = word_jaccard(target, pred)
@@ -92,4 +139,3 @@ def evaluate_dataframe_jaccard(
 
     mean_jaccard = float(sum(scores) / max(len(scores), 1))
     return {"mean_jaccard": mean_jaccard, "predictions": preds, "scores": scores}
-
