@@ -256,6 +256,26 @@ def _collect_test_records_from_dir(test_root: Path) -> List[Dict[str, Any]]:
     return records
 
 
+def _has_class_subdirs(root: Path) -> bool:
+    if not root.exists() or not root.is_dir():
+        return False
+    names = {child.name.lower() for child in root.iterdir() if child.is_dir()}
+    has_cat = any(name in names for name in ("cat", "cats"))
+    has_dog = any(name in names for name in ("dog", "dogs"))
+    return bool(has_cat and has_dog)
+
+
+def _records_to_unlabeled(records: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    return [
+        {
+            "id": row["id"],
+            "filepath": row["filepath"],
+            "filename": row["filename"],
+        }
+        for row in records
+    ]
+
+
 def _discover_direct_train_test_dirs(paths_cfg: JSONDict, competition_dir: Path) -> Tuple[Optional[Path], Optional[Path]]:
     configured_train = Path(paths_cfg.get("train_dir", "")) if paths_cfg.get("train_dir") else None
     configured_test = Path(paths_cfg.get("test_dir", "")) if paths_cfg.get("test_dir") else None
@@ -328,6 +348,98 @@ def _parse_train_label(filename: str) -> Optional[int]:
 
 def build_manifests(paths_cfg: JSONDict, exp_cfg: JSONDict, force_extract: bool = False) -> Dict[str, Any]:
     paths = resolve_paths(paths_cfg)
+    configured_train_dir = Path(paths_cfg.get("train_dir", "")) if paths_cfg.get("train_dir") else None
+    configured_eval_dir = Path(paths_cfg.get("eval_dir", "")) if paths_cfg.get("eval_dir") else None
+    configured_test_dir = Path(paths_cfg.get("test_dir", "")) if paths_cfg.get("test_dir") else None
+
+    # Compatibility mode for classifier-dogs-or-cats style datasets:
+    # training_set/cats,dogs and test_set/cats,dogs (already split and labeled).
+    if (
+        configured_train_dir is not None
+        and configured_eval_dir is not None
+        and configured_train_dir.exists()
+        and configured_eval_dir.exists()
+        and _has_class_subdirs(configured_train_dir)
+        and _has_class_subdirs(configured_eval_dir)
+    ):
+        source_mode = "presplit_class_dirs"
+        train_root = configured_train_dir
+        eval_root = configured_eval_dir
+
+        train_records = _collect_train_records_from_dir(train_root)
+        val_records = _collect_train_records_from_dir(eval_root)
+
+        if configured_test_dir is not None and configured_test_dir.exists() and configured_test_dir.resolve() != eval_root.resolve():
+            test_records = _collect_test_records_from_dir(configured_test_dir)
+            test_root = configured_test_dir
+        else:
+            # If no separate unlabeled test dir exists, mirror eval paths for prediction checks.
+            test_records = _records_to_unlabeled(val_records)
+            test_root = eval_root
+
+        if not train_records:
+            raise RuntimeError(f"No labeled training images found under {train_root}")
+        if not val_records:
+            raise RuntimeError(f"No labeled evaluation images found under {eval_root}")
+        if not test_records:
+            raise RuntimeError(f"No test images found under {test_root}")
+
+        df_tr = pd.DataFrame(train_records).reset_index(drop=True)
+        df_va = pd.DataFrame(val_records).reset_index(drop=True)
+        df_test = pd.DataFrame(test_records).reset_index(drop=True)
+
+        train_manifest = paths["manifests_dir"] / "train_manifest.csv"
+        val_manifest = paths["manifests_dir"] / "val_manifest.csv"
+        test_manifest = paths["manifests_dir"] / "test_manifest.csv"
+
+        df_tr.to_csv(train_manifest, index=False)
+        df_va.to_csv(val_manifest, index=False)
+        df_test.to_csv(test_manifest, index=False)
+
+        sample_submission_path = _resolve_optional_input_file(
+            configured_path=Path(paths_cfg.get("sample_submission_csv", "")) if paths_cfg.get("sample_submission_csv") else None,
+            competition_dir=paths["competition_dir"],
+            candidate_names=["sample_submission.csv", "sampleSubmission.csv"],
+        )
+        if sample_submission_path is not None:
+            paths["sample_submission_csv"] = sample_submission_path
+
+        summary: Dict[str, Any] = {
+            "train_manifest": str(train_manifest),
+            "val_manifest": str(val_manifest),
+            "test_manifest": str(test_manifest),
+            "train_count": int(len(df_tr)),
+            "train_split_count": int(len(df_tr)),
+            "val_split_count": int(len(df_va)),
+            "test_count": int(len(df_test)),
+            "source_mode": source_mode,
+            "label_distribution": {
+                "train_label_0": int((df_tr["label"] == 0).sum()),
+                "train_label_1": int((df_tr["label"] == 1).sum()),
+                "split_train_label_0": int((df_tr["label"] == 0).sum()),
+                "split_train_label_1": int((df_tr["label"] == 1).sum()),
+                "split_val_label_0": int((df_va["label"] == 0).sum()),
+                "split_val_label_1": int((df_va["label"] == 1).sum()),
+            },
+            "train_root": str(train_root),
+            "eval_root": str(eval_root),
+            "test_root": str(test_root),
+            "resolved_inputs": {
+                "train_zip": "",
+                "test_zip": "",
+                "train_dir": str(train_root),
+                "eval_dir": str(eval_root),
+                "test_dir": str(test_root),
+                "sample_submission_csv": str(sample_submission_path) if sample_submission_path is not None else "",
+            },
+            "created_at": _now_stamp(),
+        }
+
+        summary_path = paths["reports_dir"] / "preprocess_summary.json"
+        _write_json(summary_path, summary)
+        summary["summary_path"] = str(summary_path)
+        return summary
+
     direct_train_dir, direct_test_dir = _discover_direct_train_test_dirs(
         paths_cfg=paths_cfg,
         competition_dir=paths["competition_dir"],

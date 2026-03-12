@@ -36,8 +36,9 @@ python dogs_vs_cats/src/preprocess_competition_data.py \
 ```
 
 Preprocess source priority:
-1. `train_dir`/`test_dir` if they exist (no unzip needed)
-2. otherwise `train.zip`/`test.zip` extraction
+1. `train_dir` + `eval_dir` with class folders (`cats/`,`dogs/`) for pre-split train/eval datasets
+2. `train_dir`/`test_dir` if they exist (no unzip needed)
+3. otherwise `train.zip`/`test.zip` extraction
 
 2. Sanity:
 ```bash

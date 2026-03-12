@@ -8,6 +8,9 @@ This folder stores notebook-consumable JSON configs.
 
 `train_dir` and `test_dir` are optional direct-folder inputs.
 If those paths exist, preprocess skips zip extraction.
+`eval_dir` is an optional labeled evaluation folder (for `training_set`/`test_set` style datasets).
+If `train_dir` + `eval_dir` both contain `cats/` and `dogs/`, preprocess uses them directly
+without creating a random holdout split.
 
 ## Experiment Configs
 Primary configs for this simplified pipeline:

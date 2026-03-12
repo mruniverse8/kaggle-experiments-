@@ -6,6 +6,7 @@
   "test_zip": "/kaggle/input/competitions/dogs-vs-cats-redux-kernels-edition/test.zip",
   "sample_submission_csv": "/kaggle/input/competitions/dogs-vs-cats-redux-kernels-edition/sample_submission.csv",
   "train_dir": "/kaggle/input/dogs-cats-images/dog vs cat/dataset/training_set",
+  "eval_dir": "/kaggle/input/dogs-cats-images/dog vs cat/dataset/test_set",
   "test_dir": "/kaggle/input/dogs-cats-images/dog vs cat/dataset/test_set",
   "work_dir": "/kaggle/working/dogs_vs_cats",
   "extracted_dir": "/kaggle/working/dogs_vs_cats/extracted",
