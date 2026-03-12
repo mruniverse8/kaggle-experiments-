@@ -5,6 +5,8 @@
   "train_zip": "/path/to/competitions/dogs-vs-cats-redux-kernels-edition/train.zip",
   "test_zip": "/path/to/competitions/dogs-vs-cats-redux-kernels-edition/test.zip",
   "sample_submission_csv": "/path/to/competitions/dogs-vs-cats-redux-kernels-edition/sample_submission.csv",
+  "train_dir": "/path/to/dogs-cats-images/dog vs cat/dataset/training_set",
+  "test_dir": "/path/to/dogs-cats-images/dog vs cat/dataset/test_set",
   "work_dir": "/path/to/work/dogs_vs_cats",
   "extracted_dir": "/path/to/work/dogs_vs_cats/extracted",
   "train_extracted_dir": "/path/to/work/dogs_vs_cats/extracted/train_data",

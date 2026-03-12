@@ -3,8 +3,11 @@
 This folder stores notebook-consumable JSON configs.
 
 ## Path Configs
-- `paths_kaggle.json`: Kaggle runtime paths (competition zips, extracted dirs, outputs)
+- `paths_kaggle.json`: Kaggle runtime paths (direct dirs, competition zips, extracted dirs, outputs)
 - `paths_local.json`: local-machine path template with same schema
+
+`train_dir` and `test_dir` are optional direct-folder inputs.
+If those paths exist, preprocess skips zip extraction.
 
 ## Experiment Configs
 Primary configs for this simplified pipeline:

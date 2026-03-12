@@ -25,6 +25,8 @@ python dogs_vs_cats/src/preprocess_competition_data.py \
 ```
 
 - verify train/val/test manifest files exist
+- preprocess mode now prefers direct dataset folders (`train_dir` / `test_dir`) when available
+- if direct folders are missing, it falls back to extracting `train.zip` / `test.zip`
 
 ## 4. Sanity Cell
 - run:

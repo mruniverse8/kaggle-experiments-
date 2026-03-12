@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import argparse
-import copy
 import json
 import math
 import random
@@ -164,6 +163,99 @@ def _resolve_input_file(
     )
 
 
+def _resolve_optional_input_file(
+    configured_path: Optional[Path],
+    competition_dir: Path,
+    candidate_names: Iterable[str],
+) -> Optional[Path]:
+    if configured_path is not None and configured_path.exists():
+        return configured_path
+
+    candidate_dirs = _candidate_competition_dirs(competition_dir)
+    if configured_path is not None:
+        candidate_dirs.append(configured_path.parent)
+
+    for directory in candidate_dirs:
+        for name in candidate_names:
+            candidate = directory / name
+            if candidate.exists():
+                return candidate
+    return None
+
+
+def _iter_image_files(root: Path) -> Iterable[Path]:
+    valid_suffixes = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
+    for path in sorted(root.rglob("*")):
+        if path.is_file() and path.suffix.lower() in valid_suffixes:
+            yield path
+
+
+def _collect_train_records_from_dir(train_root: Path) -> List[Dict[str, Any]]:
+    if not train_root.exists():
+        raise FileNotFoundError(f"Train directory not found: {train_root}")
+
+    class_dirs: Dict[Path, int] = {}
+    for child in sorted(train_root.iterdir()):
+        if not child.is_dir():
+            continue
+        name = child.name.lower()
+        if name in {"cat", "cats"}:
+            class_dirs[child] = 0
+        elif name in {"dog", "dogs"}:
+            class_dirs[child] = 1
+
+    records: List[Dict[str, Any]] = []
+    if class_dirs:
+        for folder, label in class_dirs.items():
+            for image_path in _iter_image_files(folder):
+                records.append(
+                    {
+                        "id": image_path.stem,
+                        "filepath": str(image_path),
+                        "label": int(label),
+                        "filename": image_path.name,
+                    }
+                )
+    else:
+        for image_path in _iter_image_files(train_root):
+            label = _parse_train_label(image_path.name)
+            if label is None:
+                continue
+            parts = image_path.stem.split(".")
+            image_id = parts[1] if len(parts) > 1 else image_path.stem
+            records.append(
+                {
+                    "id": str(image_id),
+                    "filepath": str(image_path),
+                    "label": int(label),
+                    "filename": image_path.name,
+                }
+            )
+    return records
+
+
+def _collect_test_records_from_dir(test_root: Path) -> List[Dict[str, Any]]:
+    if not test_root.exists():
+        raise FileNotFoundError(f"Test directory not found: {test_root}")
+
+    records: List[Dict[str, Any]] = []
+    seen_ids: set[str] = set()
+
+    for image_path in _iter_image_files(test_root):
+        image_id = image_path.stem
+        if image_id in seen_ids:
+            image_id = image_path.relative_to(test_root).as_posix().replace("/", "_")
+        seen_ids.add(image_id)
+        records.append(
+            {
+                "id": str(image_id),
+                "filepath": str(image_path),
+                "filename": image_path.name,
+            }
+        )
+    return records
+
+
 def _locate_image_root(extract_dir: Path, preferred: str) -> Path:
     candidate = extract_dir / preferred
     if candidate.exists():
@@ -195,64 +287,56 @@ def _parse_train_label(filename: str) -> Optional[int]:
 
 def build_manifests(paths_cfg: JSONDict, exp_cfg: JSONDict, force_extract: bool = False) -> Dict[str, Any]:
     paths = resolve_paths(paths_cfg)
+    direct_train_dir = Path(paths_cfg.get("train_dir", "")) if paths_cfg.get("train_dir") else None
+    direct_test_dir = Path(paths_cfg.get("test_dir", "")) if paths_cfg.get("test_dir") else None
 
-    paths["train_zip"] = _resolve_input_file(
-        configured_path=paths["train_zip"],
-        competition_dir=paths["competition_dir"],
-        candidate_names=["train.zip"],
-        description="Train zip",
-    )
-    paths["test_zip"] = _resolve_input_file(
-        configured_path=paths["test_zip"],
-        competition_dir=paths["competition_dir"],
-        candidate_names=["test.zip"],
-        description="Test zip",
-    )
-    paths["sample_submission_csv"] = _resolve_input_file(
-        configured_path=paths["sample_submission_csv"],
+    source_mode = "zip_competition"
+    if direct_train_dir is not None and direct_test_dir is not None and direct_train_dir.exists() and direct_test_dir.exists():
+        source_mode = "direct_dirs"
+        train_root = direct_train_dir
+        test_root = direct_test_dir
+        train_records = _collect_train_records_from_dir(train_root)
+        test_records = _collect_test_records_from_dir(test_root)
+        resolved_train_zip = None
+        resolved_test_zip = None
+    else:
+        paths["train_zip"] = _resolve_input_file(
+            configured_path=paths["train_zip"],
+            competition_dir=paths["competition_dir"],
+            candidate_names=["train.zip"],
+            description="Train zip",
+        )
+        paths["test_zip"] = _resolve_input_file(
+            configured_path=paths["test_zip"],
+            competition_dir=paths["competition_dir"],
+            candidate_names=["test.zip"],
+            description="Test zip",
+        )
+
+        _extract_zip_if_needed(paths["train_zip"], paths["train_extracted_dir"], force=force_extract)
+        _extract_zip_if_needed(paths["test_zip"], paths["test_extracted_dir"], force=force_extract)
+
+        train_root = _locate_image_root(paths["train_extracted_dir"], "train")
+        try:
+            test_root = _locate_image_root(paths["test_extracted_dir"], "test")
+        except FileNotFoundError:
+            test_root = _locate_image_root(paths["test_extracted_dir"], "test1")
+
+        train_records = _collect_train_records_from_dir(train_root)
+        test_records = _collect_test_records_from_dir(test_root)
+        resolved_train_zip = paths["train_zip"]
+        resolved_test_zip = paths["test_zip"]
+
+    sample_submission_path = _resolve_optional_input_file(
+        configured_path=Path(paths_cfg.get("sample_submission_csv", "")) if paths_cfg.get("sample_submission_csv") else None,
         competition_dir=paths["competition_dir"],
         candidate_names=["sample_submission.csv", "sampleSubmission.csv"],
-        description="Sample submission CSV",
     )
-
-    _extract_zip_if_needed(paths["train_zip"], paths["train_extracted_dir"], force=force_extract)
-    _extract_zip_if_needed(paths["test_zip"], paths["test_extracted_dir"], force=force_extract)
-
-    train_root = _locate_image_root(paths["train_extracted_dir"], "train")
-    try:
-        test_root = _locate_image_root(paths["test_extracted_dir"], "test")
-    except FileNotFoundError:
-        test_root = _locate_image_root(paths["test_extracted_dir"], "test1")
-
-    train_records: List[Dict[str, Any]] = []
-    for image_path in sorted(train_root.glob("*.jpg")):
-        label = _parse_train_label(image_path.name)
-        if label is None:
-            continue
-        parts = image_path.stem.split(".")
-        image_id = parts[1] if len(parts) > 1 else image_path.stem
-        train_records.append(
-            {
-                "id": str(image_id),
-                "filepath": str(image_path),
-                "label": int(label),
-                "filename": image_path.name,
-            }
-        )
+    if sample_submission_path is not None:
+        paths["sample_submission_csv"] = sample_submission_path
 
     if not train_records:
         raise RuntimeError(f"No labeled training images found under {train_root}")
-
-    test_records: List[Dict[str, Any]] = []
-    for image_path in sorted(test_root.glob("*.jpg")):
-        image_id = image_path.stem
-        test_records.append(
-            {
-                "id": str(image_id),
-                "filepath": str(image_path),
-                "filename": image_path.name,
-            }
-        )
 
     if not test_records:
         raise RuntimeError(f"No test images found under {test_root}")
@@ -290,6 +374,7 @@ def build_manifests(paths_cfg: JSONDict, exp_cfg: JSONDict, force_extract: bool 
         "train_split_count": int(len(df_tr)),
         "val_split_count": int(len(df_va)),
         "test_count": int(len(df_test)),
+        "source_mode": source_mode,
         "label_distribution": {
             "train_label_0": int((df_train["label"] == 0).sum()),
             "train_label_1": int((df_train["label"] == 1).sum()),
@@ -301,9 +386,11 @@ def build_manifests(paths_cfg: JSONDict, exp_cfg: JSONDict, force_extract: bool 
         "train_root": str(train_root),
         "test_root": str(test_root),
         "resolved_inputs": {
-            "train_zip": str(paths["train_zip"]),
-            "test_zip": str(paths["test_zip"]),
-            "sample_submission_csv": str(paths["sample_submission_csv"]),
+            "train_zip": str(resolved_train_zip) if resolved_train_zip is not None else "",
+            "test_zip": str(resolved_test_zip) if resolved_test_zip is not None else "",
+            "train_dir": str(direct_train_dir) if direct_train_dir is not None else "",
+            "test_dir": str(direct_test_dir) if direct_test_dir is not None else "",
+            "sample_submission_csv": str(sample_submission_path) if sample_submission_path is not None else "",
         },
         "created_at": _now_stamp(),
     }
@@ -1189,7 +1276,7 @@ def run_training(paths_cfg_path: Union[str, Path], exp_cfg_path: Union[str, Path
     val_pred_df.to_csv(val_pred_csv, index=False)
     test_pred_df.to_csv(test_pred_csv, index=False)
 
-    if paths["sample_submission_csv"].exists():
+    if paths["sample_submission_csv"].is_file():
         sample = pd.read_csv(paths["sample_submission_csv"])
         merged = sample[["id"]].copy()
         test_tmp = test_pred_df[["id", "p_dog"]].rename(columns={"p_dog": "label"}).copy()

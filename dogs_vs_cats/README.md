@@ -12,7 +12,7 @@ This folder contains a simplified DinoV2 training workflow for Kaggle `dogs-vs-c
 
 ## Folder Structure
 - `configs/`
-  - `paths_kaggle.json`, `paths_local.json`
+  - `paths_kaggle.json`, `paths_local.json` (both support direct folders and zip fallback)
   - `experiments/dinov2_vitb14_single_small.json`
   - `experiments/dinov2_vitb14_single_mid.json`
   - `experiments/dinov2_vitb14_parallel_t4x2_small.json`
@@ -34,6 +34,10 @@ python dogs_vs_cats/src/preprocess_competition_data.py \
   --paths-config dogs_vs_cats/configs/paths_kaggle.json \
   --experiment-config dogs_vs_cats/configs/experiments/dinov2_vitb14_single_small.json
 ```
+
+Preprocess source priority:
+1. `train_dir`/`test_dir` if they exist (no unzip needed)
+2. otherwise `train.zip`/`test.zip` extraction
 
 2. Sanity:
 ```bash
