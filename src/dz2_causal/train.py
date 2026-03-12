@@ -147,6 +147,7 @@ def run_amp_smoke_test(
             input_ids=batch["input_ids"],
             attention_mask=batch["attention_mask"],
             labels=batch["labels"],
+            compute_span_logits=False,
         )
         losses = compute_total_loss(
             outputs=outputs,
@@ -249,6 +250,7 @@ def train(args: argparse.Namespace) -> None:
         ce_only = epoch < args.ce_only_epochs
         lambda_kl = 0.0 if ce_only else args.lambda_kl
         lambda_select = 0.0 if ce_only else args.lambda_select
+        need_span = (lambda_kl > 0.0) or (lambda_select > 0.0)
 
         running = {"loss": 0.0, "ce": 0.0, "kl": 0.0, "sel": 0.0}
 
@@ -260,6 +262,7 @@ def train(args: argparse.Namespace) -> None:
                     input_ids=batch["input_ids"],
                     attention_mask=batch["attention_mask"],
                     labels=batch["labels"],
+                    compute_span_logits=need_span,
                 )
                 losses = compute_total_loss(
                     outputs=outputs,
