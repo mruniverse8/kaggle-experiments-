@@ -1227,6 +1227,15 @@ def run_training(paths_cfg_path: Union[str, Path], exp_cfg_path: Union[str, Path
     exp_cfg = _read_json(exp_cfg_path)
 
     paths = resolve_paths(paths_cfg)
+    required_manifests = [
+        paths["manifests_dir"] / "train_manifest.csv",
+        paths["manifests_dir"] / "val_manifest.csv",
+        paths["manifests_dir"] / "test_manifest.csv",
+    ]
+    if not all(path.exists() for path in required_manifests):
+        print("Manifests not found. Running preprocess automatically...")
+        build_manifests(paths_cfg=paths_cfg, exp_cfg=exp_cfg, force_extract=False)
+
     exp_name = str(exp_cfg.get("experiment_name", "dinov2_experiment"))
     set_seed(int(exp_cfg.get("seed", 42)))
 
@@ -1376,7 +1385,8 @@ def run_sanity_check(paths_cfg_path: Union[str, Path], exp_cfg_path: Union[str, 
     val_manifest = paths["manifests_dir"] / "val_manifest.csv"
 
     if not (train_manifest.exists() and val_manifest.exists()):
-        raise FileNotFoundError("Sanity check requires train/val manifests. Run preprocessing first.")
+        print("Train/val manifests missing. Running preprocess automatically...")
+        build_manifests(paths_cfg=paths_cfg, exp_cfg=exp_cfg, force_extract=False)
 
     df_train = pd.read_csv(train_manifest)
     df_val = pd.read_csv(val_manifest)
