@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import contextmanager, nullcontext
 from typing import Dict, List
 
 import pandas as pd
@@ -79,6 +80,41 @@ def decode_generated_answer(
     return text.strip()
 
 
+def _resolve_lm_module(model):
+    return getattr(model, "lm", model)
+
+
+@contextmanager
+def _generation_mode(model):
+    """
+    Ensure generation runs in eval mode with cache enabled and without
+    gradient-checkpointing side effects.
+    """
+    lm = _resolve_lm_module(model)
+    cfg = getattr(lm, "config", None)
+
+    prev_training = bool(getattr(lm, "training", False))
+    prev_use_cache = getattr(cfg, "use_cache", None) if cfg is not None else None
+    prev_gc = bool(getattr(lm, "is_gradient_checkpointing", False))
+
+    if hasattr(model, "eval"):
+        model.eval()
+    if prev_gc and hasattr(lm, "gradient_checkpointing_disable"):
+        lm.gradient_checkpointing_disable()
+    if prev_use_cache is not None:
+        cfg.use_cache = True
+
+    try:
+        yield
+    finally:
+        if prev_use_cache is not None:
+            cfg.use_cache = prev_use_cache
+        if prev_gc and hasattr(lm, "gradient_checkpointing_enable"):
+            lm.gradient_checkpointing_enable()
+        if prev_training and hasattr(model, "train"):
+            model.train()
+
+
 @torch.no_grad()
 def predict_selected_text(
     model,
@@ -95,14 +131,22 @@ def predict_selected_text(
     encoded = {k: v.to(device) for k, v in encoded.items()}
     prompt_len = encoded["input_ids"].size(1)
 
-    out = model.lm.generate(
-        **encoded,
-        max_new_tokens=max_new_tokens,
-        do_sample=False,
-        num_beams=1,
-        pad_token_id=tokenizer.pad_token_id,
-        eos_token_id=tokenizer.eos_token_id,
+    lm = _resolve_lm_module(model)
+    amp_ctx = (
+        torch.amp.autocast(device_type="cuda", dtype=torch.float16, enabled=True)
+        if device.type == "cuda"
+        else nullcontext()
     )
+    with amp_ctx:
+        out = lm.generate(
+            **encoded,
+            max_new_tokens=max_new_tokens,
+            do_sample=False,
+            num_beams=1,
+            pad_token_id=tokenizer.pad_token_id,
+            eos_token_id=tokenizer.eos_token_id,
+            use_cache=True,
+        )
     pred = decode_generated_answer(tokenizer, out[0], prompt_len)
     if constrain_to_tweet_span:
         return best_tweet_span_by_jaccard(tweet=tweet, generated_text=pred)
@@ -121,21 +165,22 @@ def evaluate_dataframe_jaccard(
 ) -> Dict[str, object]:
     preds: List[str] = []
     scores: List[float] = []
-    for row in df.itertuples(index=False):
-        pred = predict_selected_text(
-            model=model,
-            tokenizer=tokenizer,
-            prompt=prompt_text,
-            tweet=str(row.text),
-            sentiment=str(row.sentiment),
-            device=device,
-            max_new_tokens=max_new_tokens,
-            constrain_to_tweet_span=constrain_to_tweet_span,
-        )
-        target = str(row.selected_text).strip()
-        score = word_jaccard(target, pred)
-        preds.append(pred)
-        scores.append(score)
+    with _generation_mode(model):
+        for row in df.itertuples(index=False):
+            pred = predict_selected_text(
+                model=model,
+                tokenizer=tokenizer,
+                prompt=prompt_text,
+                tweet=str(row.text),
+                sentiment=str(row.sentiment),
+                device=device,
+                max_new_tokens=max_new_tokens,
+                constrain_to_tweet_span=constrain_to_tweet_span,
+            )
+            target = str(row.selected_text).strip()
+            score = word_jaccard(target, pred)
+            preds.append(pred)
+            scores.append(score)
 
     mean_jaccard = float(sum(scores) / max(len(scores), 1))
     return {"mean_jaccard": mean_jaccard, "predictions": preds, "scores": scores}

@@ -41,7 +41,7 @@
   "auto_max_len_cap": 112,
   "filter_long_samples": true,
   "constrain_to_tweet_span": true,
-  "train_subset_fraction": 0.2,
+  "train_subset_fraction": 0.1,
   "train_subset_seed": 42,
   "snapshot_every_steps": 50
 }
