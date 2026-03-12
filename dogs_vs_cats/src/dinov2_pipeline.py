@@ -39,6 +39,98 @@ def _now_stamp() -> str:
     return time.strftime("%Y%m%d_%H%M%S")
 
 
+def _get_error_recovery_cfg(exp_cfg: JSONDict) -> JSONDict:
+    training_cfg = exp_cfg.get("training", {})
+    raw_cfg = training_cfg.get("error_recovery", {})
+    if not isinstance(raw_cfg, dict):
+        raw_cfg = {}
+
+    default_substrings = [
+        "NCCL Error",
+        "unhandled cuda error",
+        "CUDA error",
+        "cuDNN",
+    ]
+    recoverable_substrings = raw_cfg.get("recoverable_error_substrings", default_substrings)
+    if not isinstance(recoverable_substrings, list):
+        recoverable_substrings = default_substrings
+
+    return {
+        "enabled": bool(raw_cfg.get("enabled", True)),
+        "max_skipped_train_batches": max(0, int(raw_cfg.get("max_skipped_train_batches", 10))),
+        "max_skipped_eval_batches": max(0, int(raw_cfg.get("max_skipped_eval_batches", 10))),
+        "fallback_to_single_gpu_on_parallel_error": bool(
+            raw_cfg.get("fallback_to_single_gpu_on_parallel_error", True)
+        ),
+        "save_checkpoint_on_error": bool(raw_cfg.get("save_checkpoint_on_error", True)),
+        "recoverable_error_substrings": [str(item) for item in recoverable_substrings if str(item)],
+    }
+
+
+def _is_recoverable_runtime_error(exc: Exception, cfg: JSONDict) -> bool:
+    if not cfg.get("enabled", True):
+        return False
+    if not isinstance(exc, RuntimeError):
+        return False
+    message = str(exc).lower()
+    substrings = [str(item).lower() for item in cfg.get("recoverable_error_substrings", [])]
+    return any(token in message for token in substrings)
+
+
+def _clear_failed_step_state(optimizer: Optional[torch.optim.Optimizer], device: torch.device) -> None:
+    if optimizer is not None:
+        optimizer.zero_grad(set_to_none=True)
+    if device.type == "cuda" and torch.cuda.is_available():
+        try:
+            torch.cuda.empty_cache()
+        except Exception:
+            pass
+
+
+def _disable_data_parallel_if_needed(
+    model: nn.Module,
+    device: torch.device,
+    cfg: JSONDict,
+) -> Tuple[nn.Module, bool]:
+    allow_fallback = bool(cfg.get("fallback_to_single_gpu_on_parallel_error", True))
+    if not allow_fallback or not isinstance(model, nn.DataParallel):
+        return model, False
+
+    unwrapped = _unwrap_model(model)
+    unwrapped.to(device)
+    print("[recovery] DataParallel disabled after recoverable runtime error; continuing on single GPU.")
+    return unwrapped, True
+
+
+def _append_error_event(
+    events: List[JSONDict],
+    *,
+    phase: str,
+    epoch: int,
+    batch_idx: int,
+    message: str,
+    fallback_used: bool,
+) -> None:
+    events.append(
+        {
+            "phase": str(phase),
+            "epoch": int(epoch),
+            "batch_idx": int(batch_idx),
+            "fallback_used": bool(fallback_used),
+            "message": str(message),
+            "created_at": _now_stamp(),
+        }
+    )
+
+
+def _write_error_events_file(reports_dir: Path, exp_name: str, events: List[JSONDict]) -> Optional[Path]:
+    if not events:
+        return None
+    path = reports_dir / f"{exp_name}_error_events.json"
+    _write_json(path, {"experiment_name": exp_name, "events_count": len(events), "events": events})
+    return path
+
+
 def set_seed(seed: int) -> None:
     random.seed(seed)
     np.random.seed(seed)
@@ -908,7 +1000,11 @@ def evaluate_model(
     use_amp: bool,
     amp_dtype: Optional[torch.dtype],
     criterion: Optional[nn.Module] = None,
-) -> Tuple[Dict[str, float], pd.DataFrame]:
+    recovery_cfg: Optional[JSONDict] = None,
+    phase: str = "eval",
+    return_meta: bool = False,
+) -> Union[Tuple[Dict[str, float], pd.DataFrame], Tuple[Dict[str, float], pd.DataFrame, JSONDict]]:
+    recovery = recovery_cfg or _get_error_recovery_cfg({})
     model.eval()
     losses: List[float] = []
     probs_all: List[np.ndarray] = []
@@ -916,32 +1012,63 @@ def evaluate_model(
     ids_all: List[str] = []
     paths_all: List[str] = []
     logits_all: List[np.ndarray] = []
+    skipped_batches = 0
+    fallback_used = False
+    error_events: List[JSONDict] = []
 
     with torch.no_grad():
-        for batch in loader:
-            images = batch["images"].to(device, non_blocking=True)
-            labels = batch.get("labels")
-            labels_t: Optional[torch.Tensor] = None
-            if labels is not None:
-                labels_t = labels.to(device, non_blocking=True)
+        for batch_idx, batch in enumerate(loader, start=1):
+            try:
+                images = batch["images"].to(device, non_blocking=True)
+                labels = batch.get("labels")
+                labels_t: Optional[torch.Tensor] = None
+                if labels is not None:
+                    labels_t = labels.to(device, non_blocking=True)
 
-            with torch.amp.autocast(
-                device_type="cuda",
-                dtype=amp_dtype,
-                enabled=bool(use_amp and device.type == "cuda" and amp_dtype is not None),
-            ):
-                logits = model(images)
-                if criterion is not None and labels_t is not None:
-                    loss = criterion(logits, labels_t)
-                    losses.append(float(loss.detach().item()))
+                with torch.amp.autocast(
+                    device_type="cuda",
+                    dtype=amp_dtype,
+                    enabled=bool(use_amp and device.type == "cuda" and amp_dtype is not None),
+                ):
+                    logits = model(images)
+                    if criterion is not None and labels_t is not None:
+                        loss = criterion(logits, labels_t)
+                        losses.append(float(loss.detach().item()))
 
-            probs = torch.sigmoid(logits).detach().cpu().numpy()
-            probs_all.append(probs)
-            logits_all.append(logits.detach().cpu().numpy())
-            ids_all.extend(batch["ids"])
-            paths_all.extend(batch["filepaths"])
-            if labels is not None:
-                labels_all.append(labels.numpy())
+                probs = torch.sigmoid(logits).detach().cpu().numpy()
+                probs_all.append(probs)
+                logits_all.append(logits.detach().cpu().numpy())
+                ids_all.extend(batch["ids"])
+                paths_all.extend(batch["filepaths"])
+                if labels is not None:
+                    labels_all.append(labels.numpy())
+            except RuntimeError as exc:
+                if not _is_recoverable_runtime_error(exc, recovery):
+                    raise
+
+                skipped_batches += 1
+                model, switched = _disable_data_parallel_if_needed(model, device, recovery)
+                fallback_used = fallback_used or switched
+                _clear_failed_step_state(optimizer=None, device=device)
+                _append_error_event(
+                    error_events,
+                    phase=phase,
+                    epoch=-1,
+                    batch_idx=batch_idx,
+                    message=str(exc),
+                    fallback_used=switched,
+                )
+                print(
+                    f"[recovery][{phase}] skipped eval batch={batch_idx} "
+                    f"(recoverable error): {exc}"
+                )
+
+                if skipped_batches > int(recovery.get("max_skipped_eval_batches", 10)):
+                    raise RuntimeError(
+                        f"Exceeded max_skipped_eval_batches={recovery.get('max_skipped_eval_batches', 10)} "
+                        f"during {phase}. Last error: {exc}"
+                    ) from exc
+                continue
 
     if probs_all:
         y_prob = np.concatenate(probs_all, axis=0)
@@ -961,13 +1088,27 @@ def evaluate_model(
         }
     )
 
-    metrics: Dict[str, float] = {}
-    if labels_all:
+    metrics: Dict[str, float] = {
+        "val_auc": float("nan"),
+        "val_logloss": float("nan"),
+        "val_accuracy": float("nan"),
+        "val_loss": float("nan"),
+    }
+    if labels_all and len(y_prob) > 0:
         y_true = np.concatenate(labels_all, axis=0).astype(int)
         metrics.update(_compute_binary_metrics(y_true=y_true, y_prob=y_prob, threshold=threshold))
         metrics["val_loss"] = float(np.mean(losses)) if losses else float("nan")
         pred_df["label_true"] = y_true
 
+    meta = {
+        "model": model,
+        "skipped_batches": int(skipped_batches),
+        "fallback_used": bool(fallback_used),
+        "error_events": error_events,
+    }
+
+    if return_meta:
+        return metrics, pred_df, meta
     return metrics, pred_df
 
 
@@ -1136,6 +1277,7 @@ def _run_training_loop(
 ) -> Dict[str, Any]:
     criterion = nn.BCEWithLogitsLoss()
     optimizer = _build_optimizer(model, exp_cfg)
+    recovery_cfg = _get_error_recovery_cfg(exp_cfg)
 
     training_cfg = exp_cfg.get("training", {})
     sched_cfg = exp_cfg.get("scheduler", {})
@@ -1179,33 +1321,83 @@ def _run_training_loop(
 
     running_loss = 0.0
     running_count = 0
+    accum_count = 0
+
+    skipped_train_batches = 0
+    skipped_eval_batches = 0
+    auto_single_gpu_fallback_used = False
+    error_events: List[JSONDict] = []
 
     for epoch in range(1, epochs + 1):
         model.train()
         optimizer.zero_grad(set_to_none=True)
+        accum_count = 0
 
         for batch_idx, batch in enumerate(train_loader, start=1):
-            images = batch["images"].to(device, non_blocking=True)
-            labels = batch["labels"].to(device, non_blocking=True)
+            try:
+                images = batch["images"].to(device, non_blocking=True)
+                labels = batch["labels"].to(device, non_blocking=True)
 
-            with torch.amp.autocast(
-                device_type="cuda",
-                dtype=amp_dtype,
-                enabled=bool(mixed_precision and amp_dtype is not None),
-            ):
-                logits = model(images)
-                loss = criterion(logits, labels)
-                scaled_loss = loss / grad_accum
+                with torch.amp.autocast(
+                    device_type="cuda",
+                    dtype=amp_dtype,
+                    enabled=bool(mixed_precision and amp_dtype is not None),
+                ):
+                    logits = model(images)
+                    loss = criterion(logits, labels)
+                    scaled_loss = loss / grad_accum
 
-            if use_scaler:
-                scaler.scale(scaled_loss).backward()
-            else:
-                scaled_loss.backward()
+                if use_scaler:
+                    scaler.scale(scaled_loss).backward()
+                else:
+                    scaled_loss.backward()
 
-            running_loss += float(loss.detach().item())
-            running_count += 1
+                running_loss += float(loss.detach().item())
+                running_count += 1
+                accum_count += 1
+            except RuntimeError as exc:
+                if not _is_recoverable_runtime_error(exc, recovery_cfg):
+                    raise
 
-            if (batch_idx % grad_accum == 0) or (batch_idx == len(train_loader)):
+                skipped_train_batches += 1
+                model, switched = _disable_data_parallel_if_needed(model, device, recovery_cfg)
+                auto_single_gpu_fallback_used = auto_single_gpu_fallback_used or switched
+                _clear_failed_step_state(optimizer=optimizer, device=device)
+                _append_error_event(
+                    error_events,
+                    phase="train",
+                    epoch=epoch,
+                    batch_idx=batch_idx,
+                    message=str(exc),
+                    fallback_used=switched,
+                )
+                print(
+                    f"[recovery][train] skipped epoch={epoch} batch={batch_idx} "
+                    f"(recoverable error): {exc}"
+                )
+
+                if bool(recovery_cfg.get("save_checkpoint_on_error", True)):
+                    _save_checkpoint(
+                        model=model,
+                        optimizer=optimizer,
+                        scheduler=scheduler,
+                        checkpoint_path=last_ckpt_path,
+                        meta={
+                            "epoch": epoch,
+                            "global_step": global_step,
+                            "reason": "recoverable_train_error",
+                        },
+                    )
+
+                if skipped_train_batches > int(recovery_cfg.get("max_skipped_train_batches", 10)):
+                    raise RuntimeError(
+                        f"Exceeded max_skipped_train_batches={recovery_cfg.get('max_skipped_train_batches', 10)}. "
+                        f"Last error: {exc}"
+                    ) from exc
+                continue
+
+            should_step = (accum_count >= grad_accum) or (batch_idx == len(train_loader))
+            if should_step and accum_count > 0:
                 if use_scaler:
                     scaler.unscale_(optimizer)
 
@@ -1219,6 +1411,7 @@ def _run_training_loop(
                     optimizer.step()
 
                 optimizer.zero_grad(set_to_none=True)
+                accum_count = 0
                 scheduler.step()
                 global_step += 1
 
@@ -1243,7 +1436,7 @@ def _run_training_loop(
                     running_count = 0
 
                 if global_step % eval_every == 0:
-                    metrics, _ = evaluate_model(
+                    metrics, _, eval_meta = evaluate_model(
                         model=model,
                         loader=val_loader,
                         device=device,
@@ -1251,7 +1444,23 @@ def _run_training_loop(
                         use_amp=mixed_precision,
                         amp_dtype=amp_dtype,
                         criterion=criterion,
+                        recovery_cfg=recovery_cfg,
+                        phase="train_eval_step",
+                        return_meta=True,
                     )
+                    model = eval_meta["model"]
+                    model.train()
+                    skipped_eval_batches += int(eval_meta["skipped_batches"])
+                    auto_single_gpu_fallback_used = auto_single_gpu_fallback_used or bool(
+                        eval_meta["fallback_used"]
+                    )
+                    error_events.extend(eval_meta["error_events"])
+                    if skipped_eval_batches > int(recovery_cfg.get("max_skipped_eval_batches", 10)):
+                        raise RuntimeError(
+                            f"Exceeded cumulative max_skipped_eval_batches={recovery_cfg.get('max_skipped_eval_batches', 10)} "
+                            "during training loop evaluations."
+                        )
+
                     eval_row = {"epoch": epoch, "global_step": global_step, **metrics}
                     eval_rows.append(eval_row)
                     print(
@@ -1262,7 +1471,7 @@ def _run_training_loop(
                         f"val_accuracy={metrics.get('val_accuracy', float('nan')):.5f}"
                     )
 
-        epoch_metrics, _ = evaluate_model(
+        epoch_metrics, _, epoch_eval_meta = evaluate_model(
             model=model,
             loader=val_loader,
             device=device,
@@ -1270,7 +1479,21 @@ def _run_training_loop(
             use_amp=mixed_precision,
             amp_dtype=amp_dtype,
             criterion=criterion,
+            recovery_cfg=recovery_cfg,
+            phase="train_eval_epoch_end",
+            return_meta=True,
         )
+        model = epoch_eval_meta["model"]
+        skipped_eval_batches += int(epoch_eval_meta["skipped_batches"])
+        auto_single_gpu_fallback_used = auto_single_gpu_fallback_used or bool(
+            epoch_eval_meta["fallback_used"]
+        )
+        error_events.extend(epoch_eval_meta["error_events"])
+        if skipped_eval_batches > int(recovery_cfg.get("max_skipped_eval_batches", 10)):
+            raise RuntimeError(
+                f"Exceeded cumulative max_skipped_eval_batches={recovery_cfg.get('max_skipped_eval_batches', 10)} "
+                "at epoch-end evaluation."
+            )
         eval_rows.append({"epoch": epoch, "global_step": global_step, "event": "epoch_end", **epoch_metrics})
 
         monitor_value = float(epoch_metrics.get(monitor, float("nan")))
@@ -1336,12 +1559,20 @@ def _run_training_loop(
         "best_monitor": best_score,
         "best_epoch": best_epoch,
         "monitor": monitor,
+        "resilience": {
+            "train_skipped_batches": int(skipped_train_batches),
+            "eval_skipped_batches": int(skipped_eval_batches),
+            "auto_single_gpu_fallback_used": bool(auto_single_gpu_fallback_used),
+            "error_events_count": int(len(error_events)),
+        },
+        "error_events": error_events,
     }
 
 
 def run_training(paths_cfg_path: Union[str, Path], exp_cfg_path: Union[str, Path]) -> Dict[str, Any]:
     paths_cfg = _read_json(paths_cfg_path)
     exp_cfg = _read_json(exp_cfg_path)
+    recovery_cfg = _get_error_recovery_cfg(exp_cfg)
 
     paths = resolve_paths(paths_cfg)
     required_manifests = [
@@ -1401,14 +1632,24 @@ def run_training(paths_cfg_path: Union[str, Path], exp_cfg_path: Union[str, Path
     )
 
     best_ckpt = Path(train_state["best_checkpoint"])
-    _load_model_state(model, best_ckpt, device=device)
+    last_ckpt = Path(train_state["last_checkpoint"])
+    loaded_ckpt: Optional[Path] = best_ckpt
+    if best_ckpt.exists():
+        _load_model_state(model, best_ckpt, device=device)
+    elif last_ckpt.exists():
+        loaded_ckpt = last_ckpt
+        _load_model_state(model, last_ckpt, device=device)
+        print(f"[recovery] best checkpoint missing; loaded last checkpoint: {last_ckpt}")
+    else:
+        loaded_ckpt = None
+        print("[recovery] best/last checkpoint missing; using current in-memory model state for final evaluation.")
 
     threshold = float(exp_cfg.get("evaluation", {}).get("decision_threshold", 0.5))
     mixed_precision = bool(exp_cfg.get("training", {}).get("mixed_precision", True)) and device.type == "cuda"
     amp_dtype = _resolve_amp_dtype(exp_cfg)
 
     criterion = nn.BCEWithLogitsLoss()
-    val_metrics, val_pred_df = evaluate_model(
+    val_metrics, val_pred_df, val_meta = evaluate_model(
         model=model,
         loader=val_loader,
         device=device,
@@ -1416,8 +1657,12 @@ def run_training(paths_cfg_path: Union[str, Path], exp_cfg_path: Union[str, Path
         use_amp=mixed_precision,
         amp_dtype=amp_dtype,
         criterion=criterion,
+        recovery_cfg=recovery_cfg,
+        phase="final_val",
+        return_meta=True,
     )
-    _, test_pred_df = evaluate_model(
+    model = val_meta["model"]
+    _, test_pred_df, test_meta = evaluate_model(
         model=model,
         loader=test_loader,
         device=device,
@@ -1425,6 +1670,9 @@ def run_training(paths_cfg_path: Union[str, Path], exp_cfg_path: Union[str, Path
         use_amp=mixed_precision,
         amp_dtype=amp_dtype,
         criterion=None,
+        recovery_cfg=recovery_cfg,
+        phase="final_test",
+        return_meta=True,
     )
 
     train_hist_df = pd.DataFrame(train_state["train_history"])
@@ -1466,6 +1714,35 @@ def run_training(paths_cfg_path: Union[str, Path], exp_cfg_path: Union[str, Path
         exp_name=exp_name,
     )
 
+    train_res = train_state.get("resilience", {})
+    error_events: List[JSONDict] = list(train_state.get("error_events", []))
+    error_events.extend(val_meta.get("error_events", []))
+    error_events.extend(test_meta.get("error_events", []))
+
+    resilience = {
+        "train_skipped_batches": int(train_res.get("train_skipped_batches", 0)),
+        "eval_skipped_batches": int(train_res.get("eval_skipped_batches", 0))
+        + int(val_meta.get("skipped_batches", 0))
+        + int(test_meta.get("skipped_batches", 0)),
+        "auto_single_gpu_fallback_used": bool(train_res.get("auto_single_gpu_fallback_used", False))
+        or bool(val_meta.get("fallback_used", False))
+        or bool(test_meta.get("fallback_used", False)),
+        "error_events_count": int(len(error_events)),
+    }
+    error_events_path = _write_error_events_file(paths["reports_dir"], exp_name, error_events)
+
+    summary_files: Dict[str, str] = {
+        "metrics_csv": str(metrics_csv),
+        "train_history_csv": str(train_hist_csv),
+        "eval_history_csv": str(eval_hist_csv),
+        "val_predictions_csv": str(val_pred_csv),
+        "test_predictions_csv": str(test_pred_csv),
+        "submission_csv": str(submission_csv),
+        **plot_paths,
+    }
+    if error_events_path is not None:
+        summary_files["error_events_json"] = str(error_events_path)
+
     summary: Dict[str, Any] = {
         "experiment_name": exp_name,
         "best_checkpoint": str(best_ckpt),
@@ -1474,15 +1751,9 @@ def run_training(paths_cfg_path: Union[str, Path], exp_cfg_path: Union[str, Path
         "best_monitor": train_state["best_monitor"],
         "best_epoch": train_state["best_epoch"],
         "final_val_metrics": val_metrics,
-        "files": {
-            "metrics_csv": str(metrics_csv),
-            "train_history_csv": str(train_hist_csv),
-            "eval_history_csv": str(eval_hist_csv),
-            "val_predictions_csv": str(val_pred_csv),
-            "test_predictions_csv": str(test_pred_csv),
-            "submission_csv": str(submission_csv),
-            **plot_paths,
-        },
+        "loaded_for_final_eval_checkpoint": str(loaded_ckpt) if loaded_ckpt is not None else "",
+        "resilience": resilience,
+        "files": summary_files,
         "created_at": _now_stamp(),
     }
 
@@ -1509,14 +1780,20 @@ def _resolve_checkpoint_path(
         best_checkpoint = summary.get("best_checkpoint", "")
         if best_checkpoint and Path(best_checkpoint).exists():
             return Path(best_checkpoint)
+        last_checkpoint = summary.get("last_checkpoint", "")
+        if last_checkpoint and Path(last_checkpoint).exists():
+            return Path(last_checkpoint)
 
     fallback = paths["checkpoints_dir"] / exp_name / "best.pt"
     if fallback.exists():
         return fallback
+    fallback_last = paths["checkpoints_dir"] / exp_name / "last.pt"
+    if fallback_last.exists():
+        return fallback_last
 
     raise FileNotFoundError(
         "Could not resolve checkpoint for evaluate mode. "
-        f"Tried summary path {summary_path} and fallback {fallback}."
+        f"Tried summary path {summary_path}, fallback {fallback}, and fallback {fallback_last}."
     )
 
 
@@ -1528,6 +1805,7 @@ def run_evaluate(
 ) -> Dict[str, Any]:
     paths_cfg = _read_json(paths_cfg_path)
     exp_cfg = _read_json(exp_cfg_path)
+    recovery_cfg = _get_error_recovery_cfg(exp_cfg)
     paths = resolve_paths(paths_cfg)
 
     required_manifests = [
@@ -1590,7 +1868,7 @@ def run_evaluate(
     amp_dtype = _resolve_amp_dtype(exp_cfg)
 
     criterion = nn.BCEWithLogitsLoss()
-    val_metrics, val_pred_df = evaluate_model(
+    val_metrics, val_pred_df, val_meta = evaluate_model(
         model=model,
         loader=val_loader,
         device=device,
@@ -1598,8 +1876,12 @@ def run_evaluate(
         use_amp=mixed_precision,
         amp_dtype=amp_dtype,
         criterion=criterion,
+        recovery_cfg=recovery_cfg,
+        phase="evaluate_val",
+        return_meta=True,
     )
-    _, test_pred_df = evaluate_model(
+    model = val_meta["model"]
+    _, test_pred_df, test_meta = evaluate_model(
         model=model,
         loader=test_loader,
         device=device,
@@ -1607,6 +1889,9 @@ def run_evaluate(
         use_amp=mixed_precision,
         amp_dtype=amp_dtype,
         criterion=None,
+        recovery_cfg=recovery_cfg,
+        phase="evaluate_test",
+        return_meta=True,
     )
 
     train_hist_df = pd.DataFrame(columns=["epoch", "global_step", "train_loss", "grad_norm", "lr"])
@@ -1648,6 +1933,30 @@ def run_evaluate(
         exp_name=output_exp_name,
     )
 
+    error_events: List[JSONDict] = []
+    error_events.extend(val_meta.get("error_events", []))
+    error_events.extend(test_meta.get("error_events", []))
+    resilience = {
+        "train_skipped_batches": 0,
+        "eval_skipped_batches": int(val_meta.get("skipped_batches", 0)) + int(test_meta.get("skipped_batches", 0)),
+        "auto_single_gpu_fallback_used": bool(val_meta.get("fallback_used", False))
+        or bool(test_meta.get("fallback_used", False)),
+        "error_events_count": int(len(error_events)),
+    }
+    error_events_path = _write_error_events_file(paths["reports_dir"], output_exp_name, error_events)
+
+    summary_files: Dict[str, str] = {
+        "metrics_csv": str(metrics_csv),
+        "train_history_csv": str(train_hist_csv),
+        "eval_history_csv": str(eval_hist_csv),
+        "val_predictions_csv": str(val_pred_csv),
+        "test_predictions_csv": str(test_pred_csv),
+        "submission_csv": str(submission_csv),
+        **plot_paths,
+    }
+    if error_events_path is not None:
+        summary_files["error_events_json"] = str(error_events_path)
+
     monitor = str(exp_cfg.get("evaluation", {}).get("monitor", "val_auc"))
     summary: Dict[str, Any] = {
         "experiment_name": output_exp_name,
@@ -1659,15 +1968,8 @@ def run_evaluate(
         "best_monitor": float(val_metrics.get(monitor, float("nan"))),
         "best_epoch": -1,
         "final_val_metrics": val_metrics,
-        "files": {
-            "metrics_csv": str(metrics_csv),
-            "train_history_csv": str(train_hist_csv),
-            "eval_history_csv": str(eval_hist_csv),
-            "val_predictions_csv": str(val_pred_csv),
-            "test_predictions_csv": str(test_pred_csv),
-            "submission_csv": str(submission_csv),
-            **plot_paths,
-        },
+        "resilience": resilience,
+        "files": summary_files,
         "created_at": _now_stamp(),
     }
 

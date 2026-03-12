@@ -30,6 +30,12 @@ Notebook-first run order for DinoV2 Dogs vs Cats (producer/consumer):
 - compares both runs with a unified "special" figure and summary table
 - exports artifacts for both runs into the bundle format
 
+## Resilience Behavior (Parallel Runs)
+- training/evaluation can skip recoverable CUDA/NCCL/DataParallel failing batches
+- recovery can automatically disable DataParallel and continue on single GPU
+- checkpoints are still updated (`best.pt` / `last.pt`) when possible
+- summaries include `resilience` stats and optional `error_events_json` with recovery details
+
 ## Config Switching (02 Producer)
 Use environment variable `CFG_PATH` to swap profiles:
 - `dogs_vs_cats/configs/experiments/dinov2_vitb14_single_small.json`
