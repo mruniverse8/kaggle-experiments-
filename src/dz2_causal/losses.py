@@ -6,6 +6,16 @@ import torch
 import torch.nn.functional as F
 
 
+def _reduce_dp_scalar(x: torch.Tensor) -> torch.Tensor:
+    """
+    DataParallel gathers scalar outputs from each device into a 1D tensor.
+    Reduce them to a true scalar for stable backward() and .item() calls.
+    """
+    if torch.is_tensor(x) and x.ndim > 0:
+        return x.mean()
+    return x
+
+
 def span_kl_loss(
     start_logits: torch.Tensor,
     end_logits: torch.Tensor,
@@ -58,7 +68,7 @@ def compute_total_loss(
     lambda_kl: float,
     lambda_select: float,
 ) -> Dict[str, torch.Tensor]:
-    ce_loss = outputs["ce_loss"]
+    ce_loss = _reduce_dp_scalar(outputs["ce_loss"])
     total = ce_loss
 
     kl_loss = torch.tensor(0.0, device=ce_loss.device, dtype=ce_loss.dtype)
@@ -74,6 +84,7 @@ def compute_total_loss(
             end_soft=batch["end_soft"],
             source_mask=batch["source_mask"],
         )
+        kl_loss = _reduce_dp_scalar(kl_loss)
         total = total + lambda_kl * kl_loss
 
     if lambda_select > 0.0:
@@ -84,6 +95,7 @@ def compute_total_loss(
             select_targets=batch["select_targets"],
             source_mask=batch["source_mask"],
         )
+        select_loss = _reduce_dp_scalar(select_loss)
         total = total + lambda_select * select_loss
 
     return {
