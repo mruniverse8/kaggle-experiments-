@@ -13,6 +13,12 @@ def span_kl_loss(
     end_soft: torch.Tensor,
     source_mask: torch.Tensor,
 ) -> torch.Tensor:
+    # Keep all span-loss tensors in the same compute dtype to avoid
+    # inadvertent fp32/bf16 promotions during no-AMP training.
+    start_soft = start_soft.to(start_logits.dtype)
+    end_soft = end_soft.to(end_logits.dtype)
+    source_mask = source_mask.to(start_logits.dtype)
+
     neg = torch.tensor(-1e4, dtype=start_logits.dtype, device=start_logits.device)
     masked_start = torch.where(source_mask > 0, start_logits, neg)
     masked_end = torch.where(source_mask > 0, end_logits, neg)
@@ -30,7 +36,9 @@ def bce_dice_select_loss(
     select_targets: torch.Tensor,
     source_mask: torch.Tensor,
 ) -> torch.Tensor:
-    m = source_mask.float()
+    # Match dtype with logits to avoid explicit fp32 upcasts.
+    m = source_mask.to(select_logits.dtype)
+    select_targets = select_targets.to(select_logits.dtype)
     bce = F.binary_cross_entropy_with_logits(
         select_logits, select_targets, reduction="none"
     )
@@ -80,4 +88,3 @@ def compute_total_loss(
         "kl_loss": kl_loss.detach(),
         "select_loss": select_loss.detach(),
     }
-
