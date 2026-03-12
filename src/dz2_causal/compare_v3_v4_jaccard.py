@@ -25,6 +25,7 @@ def default_compare_config() -> Dict:
         "trust_remote_code": False,
         "max_new_tokens": 16,
         "constrain_to_tweet_span": True,
+        "eval_subset_fraction": 1.0,
         "max_eval_rows": 0,
         "device": "cuda:0",
         "seed": 42,
@@ -184,6 +185,15 @@ def run_comparison(args: argparse.Namespace) -> Dict[str, object]:
     print(f"Using device: {device}")
 
     df = pd.read_csv(args.eval_csv).dropna(subset=["text", "sentiment", "selected_text"]).reset_index(drop=True)
+    eval_subset_fraction = float(getattr(args, "eval_subset_fraction", 1.0))
+    if not (0.0 < eval_subset_fraction <= 1.0):
+        raise ValueError("Config value 'eval_subset_fraction' must be in the interval (0, 1].")
+
+    if eval_subset_fraction < 1.0:
+        subset_rows = max(1, int(round(len(df) * eval_subset_fraction)))
+        df = df.sample(n=subset_rows, random_state=int(args.seed)).reset_index(drop=True)
+        print(f"Eval subset enabled: fraction={eval_subset_fraction:.3f} rows={len(df)}")
+
     if int(args.max_eval_rows) > 0 and int(args.max_eval_rows) < len(df):
         df = df.sample(n=int(args.max_eval_rows), random_state=int(args.seed)).reset_index(drop=True)
     print(f"Eval rows: {len(df)} | constrain_to_tweet_span={bool(args.constrain_to_tweet_span)}")

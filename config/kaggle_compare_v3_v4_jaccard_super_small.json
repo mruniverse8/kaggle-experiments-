@@ -1,0 +1,15 @@
+{
+  "eval_csv": "/kaggle/input/competitions/tweet-sentiment-extraction/train.csv",
+  "output_dir": "/kaggle/working/twitter_sentiment_outputs/v5_compartive_super_small",
+  "model_name": "Qwen/Qwen3.5-0.8B",
+  "prompt_text": "You are a professional emotion identifier.",
+  "v3_checkpoint": "/kaggle/input/v3-checkpoints/model_fold0.pt",
+  "v4_checkpoint": "/kaggle/input/v4-checkpoints/model_fold0.pt",
+  "trust_remote_code": false,
+  "max_new_tokens": 16,
+  "constrain_to_tweet_span": true,
+  "max_eval_rows": 0,
+  "device": "cuda:0",
+  "seed": 42,
+  "eval_subset_fraction": 0.5
+}
