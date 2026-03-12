@@ -67,6 +67,40 @@ python dogs_vs_cats/src/dinov2_pipeline.py \
   - submission CSV
   - summary JSON report
 
+## 8. Export Artifacts Cell (Producer Notebooks)
+- run:
+
+```bash
+python dogs_vs_cats/src/export_experiment_artifacts.py \
+  --paths-config <paths_cfg> \
+  --experiment-config <cfg_path>
+```
+
+- write deterministic reusable bundle under `artifacts_output_dir`:
+  - `bundle_index.json`
+  - `<experiment_name>/manifest.json`
+  - copied checkpoints/evaluation files/configs
+
+## 03 Hypothesis Notebook Format (Consumer)
+- bootstrap repo + dependencies
+- load `PATHS_CFG` and `ARTIFACT_INPUT_ROOT`
+- read uploaded `bundle_index.json`
+- select experiments (env-controlled)
+- validate required result files
+- compare metrics directly from uploaded manifests/results (no retrain)
+- optional fallback:
+  - `ENABLE_FALLBACK_EVAL=1`
+  - calls evaluate-only mode:
+
+```bash
+python dogs_vs_cats/src/dinov2_pipeline.py \
+  --mode evaluate \
+  --paths-config <paths_cfg> \
+  --experiment-config <uploaded_exp_cfg> \
+  --checkpoint-path <uploaded_best_ckpt> \
+  --summary-suffix eval_only
+```
+
 ## Notes
 - Keep evaluation lightweight: no OOF/fold reports by default.
 - Default validation protocol is single stratified holdout (80/20).

@@ -51,12 +51,15 @@ def _to_path(value: Union[str, Path]) -> Path:
 
 
 def resolve_paths(paths_cfg: JSONDict) -> Dict[str, Path]:
+    work_dir = _to_path(paths_cfg["work_dir"])
+    artifacts_output_dir = _to_path(paths_cfg.get("artifacts_output_dir", str(work_dir / "output")))
+
     paths: Dict[str, Path] = {
         "competition_dir": _to_path(paths_cfg["competition_dir"]),
         "train_zip": _to_path(paths_cfg["train_zip"]),
         "test_zip": _to_path(paths_cfg["test_zip"]),
         "sample_submission_csv": _to_path(paths_cfg["sample_submission_csv"]),
-        "work_dir": _to_path(paths_cfg["work_dir"]),
+        "work_dir": work_dir,
         "extracted_dir": _to_path(paths_cfg["extracted_dir"]),
         "train_extracted_dir": _to_path(paths_cfg["train_extracted_dir"]),
         "test_extracted_dir": _to_path(paths_cfg["test_extracted_dir"]),
@@ -67,6 +70,7 @@ def resolve_paths(paths_cfg: JSONDict) -> Dict[str, Path]:
         "plots_dir": _to_path(paths_cfg["plots_dir"]),
         "predictions_dir": _to_path(paths_cfg["predictions_dir"]),
         "reports_dir": _to_path(paths_cfg["reports_dir"]),
+        "artifacts_output_dir": artifacts_output_dir,
     }
 
     for key in (
@@ -81,6 +85,7 @@ def resolve_paths(paths_cfg: JSONDict) -> Dict[str, Path]:
         "plots_dir",
         "predictions_dir",
         "reports_dir",
+        "artifacts_output_dir",
     ):
         paths[key].mkdir(parents=True, exist_ok=True)
     return paths
@@ -1487,6 +1492,191 @@ def run_training(paths_cfg_path: Union[str, Path], exp_cfg_path: Union[str, Path
     return summary
 
 
+def _resolve_checkpoint_path(
+    paths: Dict[str, Path],
+    exp_name: str,
+    checkpoint_path: str = "",
+) -> Path:
+    if checkpoint_path:
+        candidate = Path(checkpoint_path)
+        if not candidate.exists():
+            raise FileNotFoundError(f"Checkpoint path does not exist: {candidate}")
+        return candidate
+
+    summary_path = paths["reports_dir"] / f"{exp_name}_training_summary.json"
+    if summary_path.exists():
+        summary = _read_json(summary_path)
+        best_checkpoint = summary.get("best_checkpoint", "")
+        if best_checkpoint and Path(best_checkpoint).exists():
+            return Path(best_checkpoint)
+
+    fallback = paths["checkpoints_dir"] / exp_name / "best.pt"
+    if fallback.exists():
+        return fallback
+
+    raise FileNotFoundError(
+        "Could not resolve checkpoint for evaluate mode. "
+        f"Tried summary path {summary_path} and fallback {fallback}."
+    )
+
+
+def run_evaluate(
+    paths_cfg_path: Union[str, Path],
+    exp_cfg_path: Union[str, Path],
+    checkpoint_path: str = "",
+    summary_suffix: str = "eval_only",
+) -> Dict[str, Any]:
+    paths_cfg = _read_json(paths_cfg_path)
+    exp_cfg = _read_json(exp_cfg_path)
+    paths = resolve_paths(paths_cfg)
+
+    required_manifests = [
+        paths["manifests_dir"] / "train_manifest.csv",
+        paths["manifests_dir"] / "val_manifest.csv",
+        paths["manifests_dir"] / "test_manifest.csv",
+    ]
+    if not all(path.exists() for path in required_manifests):
+        print("Manifests not found. Running preprocess automatically...")
+        build_manifests(paths_cfg=paths_cfg, exp_cfg=exp_cfg, force_extract=False)
+
+    base_exp_name = str(exp_cfg.get("experiment_name", "dinov2_experiment"))
+    suffix = str(summary_suffix).strip()
+    output_exp_name = f"{base_exp_name}_{suffix}" if suffix else base_exp_name
+
+    set_seed(int(exp_cfg.get("seed", 42)))
+
+    _, val_loader, test_loader = _prepare_dataloaders(paths=paths, exp_cfg=exp_cfg)
+
+    model_cfg = exp_cfg.get("model", {})
+    backbone_name = str(model_cfg.get("backbone_name", "facebook/dinov2-base"))
+    model = DinoBinaryClassifier(
+        backbone_name=backbone_name,
+        embed_dim=model_cfg.get("embed_dim"),
+        head_dropout=float(model_cfg.get("head_dropout", 0.0)),
+        weights_source=str(exp_cfg.get("weights_source", "auto_download_with_fallback")),
+        local_weights_path=str(exp_cfg.get("local_weights_path", "")),
+        random_init=False,
+    )
+
+    gradient_checkpointing = bool(exp_cfg.get("gradient_checkpointing", False))
+    if gradient_checkpointing and hasattr(model.backbone, "gradient_checkpointing_enable"):
+        model.backbone.gradient_checkpointing_enable()
+
+    device, dp_ids = _resolve_device_and_parallel(exp_cfg)
+    model.to(device)
+    apply_freeze_policy(model, exp_cfg)
+
+    if device.type == "cuda":
+        print(f"Using CUDA device: {device}")
+        for gid in dp_ids:
+            free_b, total_b = torch.cuda.mem_get_info(gid)
+            print(
+                f"[cuda:{gid}] free={free_b/(1024**3):.2f}GB total={total_b/(1024**3):.2f}GB"
+            )
+
+    if bool(exp_cfg.get("use_data_parallel", False)) and len(dp_ids) >= 2 and device.type == "cuda":
+        model = nn.DataParallel(model, device_ids=dp_ids, output_device=dp_ids[0])
+        print(f"DataParallel enabled on GPUs: {dp_ids}")
+
+    resolved_checkpoint = _resolve_checkpoint_path(
+        paths=paths,
+        exp_name=base_exp_name,
+        checkpoint_path=checkpoint_path,
+    )
+    _load_model_state(model, resolved_checkpoint, device=device)
+
+    threshold = float(exp_cfg.get("evaluation", {}).get("decision_threshold", 0.5))
+    mixed_precision = bool(exp_cfg.get("training", {}).get("mixed_precision", True)) and device.type == "cuda"
+    amp_dtype = _resolve_amp_dtype(exp_cfg)
+
+    criterion = nn.BCEWithLogitsLoss()
+    val_metrics, val_pred_df = evaluate_model(
+        model=model,
+        loader=val_loader,
+        device=device,
+        threshold=threshold,
+        use_amp=mixed_precision,
+        amp_dtype=amp_dtype,
+        criterion=criterion,
+    )
+    _, test_pred_df = evaluate_model(
+        model=model,
+        loader=test_loader,
+        device=device,
+        threshold=threshold,
+        use_amp=mixed_precision,
+        amp_dtype=amp_dtype,
+        criterion=None,
+    )
+
+    train_hist_df = pd.DataFrame(columns=["epoch", "global_step", "train_loss", "grad_norm", "lr"])
+    eval_hist_df = pd.DataFrame(columns=["epoch", "global_step", "val_loss", "val_auc", "val_logloss", "val_accuracy"])
+
+    metrics_csv = paths["metrics_dir"] / f"{output_exp_name}_metrics.csv"
+    train_hist_csv = paths["metrics_dir"] / f"{output_exp_name}_train_history.csv"
+    eval_hist_csv = paths["metrics_dir"] / f"{output_exp_name}_eval_history.csv"
+
+    pd.DataFrame([val_metrics]).to_csv(metrics_csv, index=False)
+    train_hist_df.to_csv(train_hist_csv, index=False)
+    eval_hist_df.to_csv(eval_hist_csv, index=False)
+
+    val_pred_csv = paths["predictions_dir"] / f"{output_exp_name}_val_predictions.csv"
+    test_pred_csv = paths["predictions_dir"] / f"{output_exp_name}_test_predictions.csv"
+    submission_csv = paths["predictions_dir"] / f"{output_exp_name}_submission.csv"
+
+    val_pred_df.to_csv(val_pred_csv, index=False)
+    test_pred_df.to_csv(test_pred_csv, index=False)
+
+    if paths["sample_submission_csv"].is_file():
+        sample = pd.read_csv(paths["sample_submission_csv"])
+        merged = sample[["id"]].copy()
+        test_tmp = test_pred_df[["id", "p_dog"]].rename(columns={"p_dog": "label"}).copy()
+        merged["id"] = merged["id"].astype(str)
+        test_tmp["id"] = test_tmp["id"].astype(str)
+        merged = merged.merge(test_tmp, how="left", on="id")
+        merged["label"] = merged["label"].fillna(0.5)
+        merged.to_csv(submission_csv, index=False)
+    else:
+        sub = test_pred_df[["id", "p_dog"]].rename(columns={"p_dog": "label"}).copy()
+        sub.to_csv(submission_csv, index=False)
+
+    plot_paths = _save_basic_plots(
+        train_hist=train_hist_df,
+        eval_hist=eval_hist_df,
+        val_pred_df=val_pred_df,
+        plots_dir=paths["plots_dir"],
+        exp_name=output_exp_name,
+    )
+
+    monitor = str(exp_cfg.get("evaluation", {}).get("monitor", "val_auc"))
+    summary: Dict[str, Any] = {
+        "experiment_name": output_exp_name,
+        "source_experiment_name": base_exp_name,
+        "mode": "evaluate",
+        "best_checkpoint": str(resolved_checkpoint),
+        "last_checkpoint": "",
+        "monitor": monitor,
+        "best_monitor": float(val_metrics.get(monitor, float("nan"))),
+        "best_epoch": -1,
+        "final_val_metrics": val_metrics,
+        "files": {
+            "metrics_csv": str(metrics_csv),
+            "train_history_csv": str(train_hist_csv),
+            "eval_history_csv": str(eval_hist_csv),
+            "val_predictions_csv": str(val_pred_csv),
+            "test_predictions_csv": str(test_pred_csv),
+            "submission_csv": str(submission_csv),
+            **plot_paths,
+        },
+        "created_at": _now_stamp(),
+    }
+
+    summary_path = paths["reports_dir"] / f"{output_exp_name}_training_summary.json"
+    _write_json(summary_path, summary)
+    summary["summary_path"] = str(summary_path)
+    return summary
+
+
 def run_sanity_check(paths_cfg_path: Union[str, Path], exp_cfg_path: Union[str, Path]) -> Dict[str, Any]:
     paths_cfg = _read_json(paths_cfg_path)
     exp_cfg = _read_json(exp_cfg_path)
@@ -1653,16 +1843,25 @@ def run_preprocess(paths_cfg_path: Union[str, Path], exp_cfg_path: Union[str, Pa
 
 def _cli() -> None:
     parser = argparse.ArgumentParser(description="DinoV2 Dogs-vs-Cats utilities")
-    parser.add_argument("--mode", choices=["preprocess", "sanity", "train"], required=True)
+    parser.add_argument("--mode", choices=["preprocess", "sanity", "train", "evaluate"], required=True)
     parser.add_argument("--paths-config", required=True)
     parser.add_argument("--experiment-config", required=True)
     parser.add_argument("--force-extract", action="store_true")
+    parser.add_argument("--checkpoint-path", default="")
+    parser.add_argument("--summary-suffix", default="eval_only")
     args = parser.parse_args()
 
     if args.mode == "preprocess":
         result = run_preprocess(args.paths_config, args.experiment_config, force_extract=args.force_extract)
     elif args.mode == "sanity":
         result = run_sanity_check(args.paths_config, args.experiment_config)
+    elif args.mode == "evaluate":
+        result = run_evaluate(
+            paths_cfg_path=args.paths_config,
+            exp_cfg_path=args.experiment_config,
+            checkpoint_path=args.checkpoint_path,
+            summary_suffix=args.summary_suffix,
+        )
     else:
         result = run_training(args.paths_config, args.experiment_config)
 

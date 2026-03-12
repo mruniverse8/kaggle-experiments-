@@ -1,6 +1,6 @@
 # Notebook Plan (Simplified)
 
-Notebook-first run order for DinoV2 Dogs vs Cats:
+Notebook-first run order for DinoV2 Dogs vs Cats (producer/consumer):
 
 1. `02_dinov2_training_single_gpu.ipynb`
 - bootstrap repo + install requirements
@@ -9,22 +9,32 @@ Notebook-first run order for DinoV2 Dogs vs Cats:
 - run random-init sanity check
 - train DinoV2 ViT-B/14 on single GPU
 - save metrics/plots/predictions/submission
+- export reusable artifacts bundle (`manifest.json` + `bundle_index.json`)
 
 2. `02_dinov2_training_parallel_t4x2.ipynb`
 - same flow as above
 - config defaults to `parallel_t4x2_small`
 - uses `DataParallel` over GPUs `[0,1]`
 - memory-safe defaults (`fp16`, grad accumulation, checkpointing)
+- exports the same reusable bundle format
 
-## Config Switching
+3. `03_dinov2_augmentation_hypothesis_parallel_t4x2.ipynb`
+- consumer notebook: compares uploaded artifacts from `/kaggle/input/...`
+- default behavior: no training
+- optional fallback evaluate-only mode from uploaded checkpoints (`ENABLE_FALLBACK_EVAL=1`)
+
+## Config Switching (02 Producer)
 Use environment variable `CFG_PATH` to swap profiles:
 - `dogs_vs_cats/configs/experiments/dinov2_vitb14_single_small.json`
 - `dogs_vs_cats/configs/experiments/dinov2_vitb14_single_mid.json`
 - `dogs_vs_cats/configs/experiments/dinov2_vitb14_parallel_t4x2_small.json`
 - `dogs_vs_cats/configs/experiments/dinov2_vitb14_parallel_t4x2_mid.json`
 
-## Required Paths
-These notebooks expect Kaggle competition files:
+## Required Paths (02 Producer)
+Training notebooks expect Kaggle competition files:
 - `/kaggle/input/competitions/dogs-vs-cats-redux-kernels-edition/train.zip`
 - `/kaggle/input/competitions/dogs-vs-cats-redux-kernels-edition/test.zip`
 - `/kaggle/input/competitions/dogs-vs-cats-redux-kernels-edition/sample_submission.csv`
+
+## Required Paths (03 Consumer)
+- `ARTIFACT_INPUT_ROOT` should point to uploaded bundle dataset root containing `bundle_index.json`.

@@ -11,6 +11,8 @@ If those paths exist, preprocess skips zip extraction.
 `eval_dir` is an optional labeled evaluation folder (for `training_set`/`test_set` style datasets).
 If `train_dir` + `eval_dir` both contain `cats/` and `dogs/`, preprocess uses them directly
 without creating a random holdout split.
+`artifacts_output_dir` is the producer output root for reusable bundles exported by
+`src/export_experiment_artifacts.py` (default fallback: `<work_dir>/output`).
 
 ## Experiment Configs
 Primary configs for this simplified pipeline:
@@ -35,4 +37,16 @@ Each experiment config includes:
 1. Load one `paths_*.json`.
 2. Load one experiment config from `experiments/`.
 3. Run preprocess, sanity, then train via pipeline scripts.
-4. Read output summaries from `evaluation/reports/`.
+4. Export reusable artifacts into `artifacts_output_dir`.
+5. Read output summaries from `evaluation/reports/` or uploaded bundle manifests.
+
+## Bundle Schema
+`artifacts_output_dir` contains:
+- `bundle_index.json`
+- `<experiment_name>/manifest.json`
+- `<experiment_name>/checkpoints/`
+- `<experiment_name>/metrics/`
+- `<experiment_name>/predictions/`
+- `<experiment_name>/plots/`
+- `<experiment_name>/reports/`
+- `<experiment_name>/configs/`

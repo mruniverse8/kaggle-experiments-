@@ -18,5 +18,6 @@
   "metrics_dir": "/path/to/work/dogs_vs_cats/evaluation/metrics",
   "plots_dir": "/path/to/work/dogs_vs_cats/evaluation/plots",
   "predictions_dir": "/path/to/work/dogs_vs_cats/evaluation/predictions",
-  "reports_dir": "/path/to/work/dogs_vs_cats/evaluation/reports"
+  "reports_dir": "/path/to/work/dogs_vs_cats/evaluation/reports",
+  "artifacts_output_dir": "/path/to/work/dogs_vs_cats/output"
 }
