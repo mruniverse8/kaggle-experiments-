@@ -65,6 +65,8 @@ def compute_total_loss(
     select_loss = torch.tensor(0.0, device=ce_loss.device, dtype=ce_loss.dtype)
 
     if lambda_kl > 0.0:
+        if outputs.get("start_logits") is None or outputs.get("end_logits") is None:
+            raise ValueError("KL loss requested but span logits are missing from model outputs.")
         kl_loss = span_kl_loss(
             start_logits=outputs["start_logits"],
             end_logits=outputs["end_logits"],
@@ -75,6 +77,8 @@ def compute_total_loss(
         total = total + lambda_kl * kl_loss
 
     if lambda_select > 0.0:
+        if outputs.get("select_logits") is None:
+            raise ValueError("Select loss requested but select logits are missing from model outputs.")
         select_loss = bce_dice_select_loss(
             select_logits=outputs["select_logits"],
             select_targets=batch["select_targets"],
