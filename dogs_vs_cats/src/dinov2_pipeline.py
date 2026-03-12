@@ -103,6 +103,67 @@ def _extract_zip_if_needed(zip_path: Path, extract_to: Path, force: bool = False
         archive.extractall(extract_to)
 
 
+def _candidate_competition_dirs(base_dir: Path) -> List[Path]:
+    dirs: List[Path] = [base_dir]
+    as_posix = base_dir.as_posix()
+    if "/kaggle/input/competitions/" in as_posix:
+        dirs.append(Path(as_posix.replace("/kaggle/input/competitions/", "/kaggle/input/")))
+    elif "/kaggle/input/" in as_posix and "/kaggle/input/competitions/" not in as_posix:
+        dirs.append(Path(as_posix.replace("/kaggle/input/", "/kaggle/input/competitions/")))
+
+    slug = base_dir.name
+    if slug:
+        dirs.append(Path("/kaggle/input") / slug)
+        dirs.append(Path("/kaggle/input/competitions") / slug)
+
+    # Include discovered dirs that contain the competition slug.
+    for parent in (Path("/kaggle/input"), Path("/kaggle/input/competitions")):
+        if parent.exists() and slug:
+            for match in parent.glob(f"*{slug}*"):
+                if match.is_dir():
+                    dirs.append(match)
+
+    # Keep order while removing duplicates.
+    unique: List[Path] = []
+    seen = set()
+    for directory in dirs:
+        key = directory.as_posix()
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(directory)
+    return unique
+
+
+def _resolve_input_file(
+    configured_path: Path,
+    competition_dir: Path,
+    candidate_names: Iterable[str],
+    description: str,
+) -> Path:
+    if configured_path.exists():
+        return configured_path
+
+    tried: List[Path] = [configured_path]
+    candidate_dirs = _candidate_competition_dirs(competition_dir)
+    candidate_dirs.append(configured_path.parent)
+
+    for directory in candidate_dirs:
+        for name in candidate_names:
+            candidate = directory / name
+            tried.append(candidate)
+            if candidate.exists():
+                return candidate
+
+    tried_display = "\n".join(f"  - {path}" for path in tried)
+    raise FileNotFoundError(
+        f"{description} was not found.\n"
+        f"Configured path: {configured_path}\n"
+        f"Tried these locations:\n{tried_display}\n"
+        "Update paths_kaggle.json or mount the competition dataset."
+    )
+
+
 def _locate_image_root(extract_dir: Path, preferred: str) -> Path:
     candidate = extract_dir / preferred
     if candidate.exists():
@@ -135,11 +196,33 @@ def _parse_train_label(filename: str) -> Optional[int]:
 def build_manifests(paths_cfg: JSONDict, exp_cfg: JSONDict, force_extract: bool = False) -> Dict[str, Any]:
     paths = resolve_paths(paths_cfg)
 
+    paths["train_zip"] = _resolve_input_file(
+        configured_path=paths["train_zip"],
+        competition_dir=paths["competition_dir"],
+        candidate_names=["train.zip"],
+        description="Train zip",
+    )
+    paths["test_zip"] = _resolve_input_file(
+        configured_path=paths["test_zip"],
+        competition_dir=paths["competition_dir"],
+        candidate_names=["test.zip"],
+        description="Test zip",
+    )
+    paths["sample_submission_csv"] = _resolve_input_file(
+        configured_path=paths["sample_submission_csv"],
+        competition_dir=paths["competition_dir"],
+        candidate_names=["sample_submission.csv", "sampleSubmission.csv"],
+        description="Sample submission CSV",
+    )
+
     _extract_zip_if_needed(paths["train_zip"], paths["train_extracted_dir"], force=force_extract)
     _extract_zip_if_needed(paths["test_zip"], paths["test_extracted_dir"], force=force_extract)
 
     train_root = _locate_image_root(paths["train_extracted_dir"], "train")
-    test_root = _locate_image_root(paths["test_extracted_dir"], "test")
+    try:
+        test_root = _locate_image_root(paths["test_extracted_dir"], "test")
+    except FileNotFoundError:
+        test_root = _locate_image_root(paths["test_extracted_dir"], "test1")
 
     train_records: List[Dict[str, Any]] = []
     for image_path in sorted(train_root.glob("*.jpg")):
@@ -217,6 +300,11 @@ def build_manifests(paths_cfg: JSONDict, exp_cfg: JSONDict, force_extract: bool 
         },
         "train_root": str(train_root),
         "test_root": str(test_root),
+        "resolved_inputs": {
+            "train_zip": str(paths["train_zip"]),
+            "test_zip": str(paths["test_zip"]),
+            "sample_submission_csv": str(paths["sample_submission_csv"]),
+        },
         "created_at": _now_stamp(),
     }
 
